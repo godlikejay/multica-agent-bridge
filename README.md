@@ -20,6 +20,13 @@ the operating permissions have been reviewed.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for where to make changes and what counts as
 evidence, and [the protocol](docs/protocol.md) for file formats and receipts.
 
+## Use with an existing Multica
+
+Build one runtime image containing Multica Daemon and Bridge, then start it
+with Compose. See [Docker setup](docs/deployment.md) for configuration and
+one-time login, and the [agent installation and mailbox tool](docs/agent-integration.md)
+for Codex, Antigravity CLI and Oh My Pi.
+
 ## Scope
 
 The standard Multica daemon owns the remote Run. An issue and observed comment

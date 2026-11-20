@@ -16,7 +16,7 @@ not evidence of an end-to-end pass. Go fixture tests are a separate layer.
 - Backend/web: official `ghcr.io/multica-ai/multica-{backend,web}:v0.11.1`.
   No `latest` fallback. Record image RepoDigests after pull; release tags alone
   are not immutable digests. The pinned upstream Dockerfile installs the CLI
-  at `/app/multica`; our runtime image copies it and builds this repository's
+  at `/app/multica`; the shared root runtime Dockerfile copies it and builds this repository's
   `./cmd/multica-bridge`. Verify both versions below before running a task.
 - Upstream `docker-compose.selfhost.yml`, `SELF_HOSTING.md`,
   `server/cmd/multica/{cmd_login,cmd_daemon,cmd_config}.go`, and

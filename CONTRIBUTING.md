@@ -9,7 +9,9 @@ coding agent, read real credentials, or connect to an outside workspace.
 | ACP handshake and wait/cancel | `internal/acp` |
 | Task identity, comments, API transport | `internal/multica` |
 | JSON files, replay and run epochs | `internal/mailbox`, `internal/bridge` and [protocol](docs/protocol.md) |
-| Build and real Multica acceptance | [e2e/README.md](e2e/README.md) |
+| Runtime image and day-to-day deployment | [Dockerfile](Dockerfile), [compose.yaml](compose.yaml) and [Docker setup](docs/deployment.md) |
+| Real Multica acceptance | [e2e/README.md](e2e/README.md) |
+| Public mailbox tool and user Skill | [skills/multica-bridge](skills/multica-bridge/SKILL.md) |
 
 Add a deterministic regression to the relevant package. Run real integration
 checks separately on a disposable Docker stack. Record upstream version, test

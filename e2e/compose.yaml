@@ -46,7 +46,8 @@ services:
     profiles: [runtime]
     build:
       context: ..
-      dockerfile: e2e/Dockerfile
+      dockerfile: Dockerfile
+    command: ["--profile", "e2e", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--max-concurrent-tasks", "1"]
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     init: true
     read_only: true

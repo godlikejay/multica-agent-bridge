@@ -11,6 +11,11 @@ RUN apk add --no-cache ca-certificates git
 COPY --from=upstream /app/multica /usr/local/bin/multica
 COPY --from=builder /multica-bridge /usr/local/bin/multica-bridge
 ENV HOME=/home/runtime BRIDGE_ROOT=/bridge MULTICA_HERMES_PATH=/usr/local/bin/multica-bridge
+RUN addgroup -g 10001 bridge \
+ && adduser -D -H -u 10001 -G bridge bridge \
+ && mkdir -p /home/runtime /bridge/inbox /bridge/outbox /bridge/state /workspaces \
+ && chown -R 10001:10001 /home/runtime /bridge /workspaces
 WORKDIR /workspaces
+USER 10001:10001
 ENTRYPOINT ["multica"]
-CMD ["--profile", "e2e", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--max-concurrent-tasks", "1"]
+CMD ["--profile", "bridge", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--max-concurrent-tasks", "1"]

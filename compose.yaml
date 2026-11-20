@@ -1,0 +1,48 @@
+name: multica-agent-bridge
+services:
+  bridge:
+    image: ${BRIDGE_IMAGE:-multica-agent-bridge:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${BRIDGE_UID:?set BRIDGE_UID to your non-root host user ID}:${BRIDGE_GID:?set BRIDGE_GID to your host group ID}"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    environment:
+      HOME: /home/runtime
+      BRIDGE_ROOT: /bridge
+      MULTICA_SERVER_URL: ${MULTICA_SERVER_URL:?set the existing Multica HTTPS API URL}
+      MULTICA_APP_URL: ${MULTICA_APP_URL:?set the existing Multica HTTPS web URL}
+      MULTICA_DAEMON_DEVICE_NAME: ${BRIDGE_DEVICE_NAME:-multica-agent-bridge}
+      MULTICA_AGENT_RUNTIME_NAME: ${BRIDGE_DEVICE_NAME:-multica-agent-bridge}
+      MULTICA_WORKSPACES_ROOT: /workspaces
+      MULTICA_DAEMON_AUTO_UPDATE: "false"
+      MULTICA_DAEMON_AUTO_RELOAD: "false"
+      BRIDGE_EXPECTED_RUNTIME_ID: ${BRIDGE_EXPECTED_RUNTIME_ID:-}
+    volumes:
+      - type: bind
+        source: ./.bridge/home
+        target: /home/runtime
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge/workspaces
+        target: /workspaces
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge/inbox
+        target: /bridge/inbox
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge/outbox
+        target: /bridge/outbox
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge/state
+        target: /bridge/state
+        bind: {create_host_path: false}
