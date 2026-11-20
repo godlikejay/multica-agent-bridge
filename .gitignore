@@ -1,0 +1,4 @@
+/bin/
+/.bridge/
+/e2e/.env
+/e2e/.work/

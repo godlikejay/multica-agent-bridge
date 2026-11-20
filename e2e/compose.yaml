@@ -1,0 +1,79 @@
+name: multica-bridge-e2e
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: multica_e2e
+      POSTGRES_USER: multica_e2e
+      POSTGRES_PASSWORD: ${E2E_DB_PASSWORD:?run ./e2e/run.sh init}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U multica_e2e -d multica_e2e"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  backend:
+    image: ghcr.io/multica-ai/multica-backend:v0.11.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["127.0.0.1:18080:8080"]
+    environment:
+      DATABASE_URL: postgres://multica_e2e:${E2E_DB_PASSWORD:?run init}@postgres:5432/multica_e2e?sslmode=disable
+      PORT: "8080"
+      JWT_SECRET: ${E2E_JWT_SECRET:?run init}
+      APP_ENV: development
+      MULTICA_DEV_VERIFICATION_CODE: "888888"
+      FRONTEND_ORIGIN: http://localhost:13000
+      MULTICA_APP_URL: http://localhost:13000
+      MULTICA_DAEMON_SERVER_URL: http://backend:8080
+      ALLOW_SIGNUP: "true"
+      DO_NOT_TRACK: "true"
+      ANALYTICS_DISABLED: "true"
+      MULTICA_CLOUD_URL: ""
+      MULTICA_LLM_API_KEY: ""
+      MULTICA_LLM_BASE_URL: ""
+    volumes: ["uploads:/app/data/uploads"]
+  frontend:
+    image: ghcr.io/multica-ai/multica-web:v0.11.1
+    depends_on: [backend]
+    ports: ["127.0.0.1:13000:3000"]
+    environment:
+      HOSTNAME: 0.0.0.0
+      REMOTE_API_URL: http://backend:8080
+  runtime:
+    profiles: [runtime]
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOME: /home/runtime
+      BRIDGE_ROOT: /bridge
+      BRIDGE_ALLOW_TEST_HTTP: "1"
+      MULTICA_SERVER_URL: http://backend:8080
+      MULTICA_APP_URL: http://localhost:13000
+      MULTICA_HERMES_PATH: /usr/local/bin/multica-bridge
+      MULTICA_DAEMON_DEVICE_NAME: synthetic-bridge-e2e
+      MULTICA_AGENT_RUNTIME_NAME: synthetic-bridge-e2e
+      MULTICA_WORKSPACES_ROOT: /workspaces
+      MULTICA_DAEMON_AUTO_UPDATE: "false"
+      MULTICA_DAEMON_AUTO_RELOAD: "false"
+    volumes:
+      - ./.local/home:/home/runtime
+      - ./.local/workspaces:/workspaces
+      - ./.local/bridge/inbox:/bridge/inbox:ro
+      - ./.local/bridge/outbox:/bridge/outbox
+      - ./.local/bridge/state:/bridge/state
+networks:
+  default:
+    internal: true
+volumes:
+  database:
+  uploads:
