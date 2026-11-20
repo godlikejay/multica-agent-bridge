@@ -1,22 +1,23 @@
 # File mailbox protocol v1
 
-`BRIDGE_ROOT` is an absolute local path. An operator writes `inbox/`; the Bridge
-writes `outbox/` and private `state/`. Do not let an untrusted process write
+`BRIDGE_ROOT` is an absolute local path. The operator writes
+`inbox/<issue_id>/<request_id>.json`; the Bridge writes shared `outbox/` and
+private `state/`. Use one root per authorized Multica workspace/Daemon. Do not let an untrusted process write
 these directories, especially the inbox. Use a local filesystem with atomic
 rename and advisory file locking; network/sync folders are not supported.
 
 Events and requests are UTF-8 JSON objects in `<id>.json`. To publish an inbox
 file, write a temporary file in the same directory and then rename it into place.
 IDs use ASCII letters, digits, underscore, dot and hyphen, begin with an
-alphanumeric character and are at most 100 characters. Do not reuse an ID with
+alphanumeric character and are at most 100 characters. IDs are unique within an Issue. Do not reuse an ID with
 different bytes; do not overwrite or clear the state of a live mailbox. Files
-larger than 256 KiB, links, partial files and malformed input are ignored. Send
-one request at a time and wait for a receipt before submitting another.
+larger than 256 KiB, links, partial files and malformed input are ignored. Submit
+one request at a time **per Issue**, waiting for that action’s receipt.
 
 ## Outbox
 
 Fields shared by all messages: `version` (integer 1), `kind`, `id`, `issue_id`,
-`run_id` (real Multica task ID), and `epoch` (positive integer). The Bridge
+`run_id` (real Multica task ID), and `epoch` (positive integer, monotonic within an Issue, not globally). The Bridge
 derives the binding from the task API and ignores routing instructions in the
 ACP prompt. An event is an observation, not permission to act.
 
@@ -56,5 +57,24 @@ Receipt statuses:
 There is no global exactly-once guarantee for remote comments. The local writer
 records intent before posting and saves the result; if it crashes between those
 steps the recovered state is uncertain. A replacement Run never auto-posts old
-inbox actions. This protocol does not implement multiple writers, indefinite
-listening, external schedulers, or automatic agent invocation.
+inbox actions. An unresolved write also blocks fresh sends on replacement Runs
+for the same Issue, without affecting other Issues.
+
+## Concurrency and upgrade
+
+The upstream Daemon admits a bounded number of active Runs. Each creates an
+independent ACP worker that resolves its Issue from the Multica task API, takes
+a non-blocking Issue lock, and reads only its own Inbox directory. Different
+Issues can progress independently; a replacement on the same Issue advances
+the epoch and retires the prior Run. The outbox is a collection of immutable
+events, not a globally ordered task queue. Completion receipts do not prove that
+a remote status is terminal, and task snapshots are not live presence.
+
+Stop the old container before upgrading, with no active Runs. Keep `state/`
+and `outbox/` but archive legacy **flat** `inbox/*.json` separately. These flat
+files are intentionally ignored; never copy them blindly into a new Issue
+directory. Check retained receipts and the remote Issue before preparing new
+requests. The JSON envelope remains v1, but operator tools must use the
+new directory layout. This protocol does not implement concurrent operators
+on different machines, indefinite listening, external schedulers, or automatic
+agent invocation.

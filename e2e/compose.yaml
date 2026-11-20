@@ -47,7 +47,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["--profile", "e2e", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--max-concurrent-tasks", "1"]
+    command: ["--profile", "e2e", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload"]
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     init: true
     read_only: true
@@ -66,6 +66,7 @@ services:
       MULTICA_WORKSPACES_ROOT: /workspaces
       MULTICA_DAEMON_AUTO_UPDATE: "false"
       MULTICA_DAEMON_AUTO_RELOAD: "false"
+      MULTICA_DAEMON_MAX_CONCURRENT_TASKS: "${BRIDGE_MAX_ACTIVE_RUNS:-2}"
     volumes:
       - ./.local/home:/home/runtime
       - ./.local/workspaces:/workspaces

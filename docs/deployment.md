@@ -56,10 +56,27 @@ select the bridge model. Keep the runtime private, and don't configure custom
 arguments, extra environments, repositories or real coding agents for it.
 A workspace owner/admin is needed if the team chooses a Custom Runtime Profile.
 
+## Concurrent Issues
+
+The Compose runtime defaults to **4 active Runs across the daemon**. Set
+`BRIDGE_MAX_ACTIVE_RUNS` in `.env` to a positive integer and recreate the
+container to change that limit (use `1` to run serially).
+The Agent's own **Max concurrent tasks** and any shared Runtime limit in
+Multica also apply: configure both to permit the desired concurrency.
+Multica v0.11.1 defaults to 6 per Agent and no extra Runtime cap. To change
+the shared cap, an authorized operator can use
+`multica --profile bridge runtime concurrency RUNTIME_ID 4` in the
+container; `none` clears that cap. These settings do not allow two Runs of the
+same Agent on the same Issue to execute together.
+
 The runtime has no published ports. Its root filesystem is read-only and it
 runs without root or added capabilities. Only the listed directories are
 mounted. An **operator** writes `.bridge/inbox` on the host; the container
 cannot write it. The Bridge writes `.bridge/outbox` and `.bridge/state`.
+Place each request in `.bridge/inbox/<issue_id>/<request_id>.json`; create the
+Issue directory on the host (the mailbox tool does this). Keep requests
+scoped to the Issue, Run and epoch from the current task event. Finishing
+one Issue does not finish or stop a concurrent Issue.
 A Skill or approval prompt is not a permission boundary when another process
 runs with the same host user privileges.
 
@@ -75,6 +92,9 @@ Keep `.bridge/home` (daemon identity) and `.bridge/state` (replay protection);
 do not copy credentials into an image. Verify no active Run before upgrading,
 then update the checkout and rebuild, or change to a reviewed image digest.
 The upstream idle watchdog and task-token limits still apply.
+On upgrade from the single-Run layout, flat inbox JSON files are no longer
+consumed. Keep the old files for inspection; do not bulk move/replay them.
+Inspect receipts and the current Run before submitting a new request.
 
 The image definition and Compose configuration are not evidence of a tested
 image until built on Docker and exercised against a compatible Multica.

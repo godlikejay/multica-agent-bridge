@@ -34,7 +34,7 @@ From the Bridge checkout, for example:
 ```sh
 export BRIDGE_ROOT="$PWD/.bridge"
 tool=skills/multica-bridge/scripts/mailbox.py
-python3 "$tool" list
+python3 "$tool" list --issue-id ISSUE_ID  # Omit the filter to find task IDs.
 python3 "$tool" read EVENT_ID
 python3 "$tool" draft EVENT_ID --kind reply --body-file reply.txt > reply.draft.json
 # Run this yourself, in a terminal, after reviewing destination and exact text.
@@ -44,12 +44,13 @@ python3 "$tool" receipt REQUEST_ID
 
 `list` shows metadata, not the full message backlog. Pick the actual event and
 its issue/run/epoch before drafting. The local list is not a complete queue of
-all Issues assigned in Multica. In this single-active-Run version, queued Runs
-are visible in Multica and appear locally only once picked up.
+all Issues assigned in Multica. Queued Runs appear locally only once picked up.
+Use `--issue-id` or `--run-id` to narrow the list; a task event is not proof
+that the Run is still active on the server.
 
 A draft is not an Inbox request. The operator's `submit` validates scope against
 the available local events, shows exactly what will be sent, and asks for
-confirmation before atomically creating the Inbox file. The Bridge independently
+confirmation before atomically creating the file under `inbox/<issue_id>/`. The Bridge independently
 checks the active binding. This is not a security boundary against other
 processes with identical filesystem and terminal privileges. To enforce a
 human-only write boundary, restrict the agent to outbox and a scratch/draft

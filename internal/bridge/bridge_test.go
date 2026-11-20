@@ -19,10 +19,15 @@ type fake struct {
 	mu      sync.Mutex
 	posts   []string
 	postErr error
+	issue   string
 }
 
-func (*fake) Task(context.Context) (multica.Task, error) {
-	return multica.Task{IssueID: "issue-1", Title: "Synthetic fixture"}, nil
+func (f *fake) Task(context.Context) (multica.Task, error) {
+	issue := f.issue
+	if issue == "" {
+		issue = "issue-1"
+	}
+	return multica.Task{IssueID: issue, Title: "Synthetic fixture"}, nil
 }
 func (*fake) Comments(context.Context, string) ([]multica.Comment, error) {
 	return []multica.Comment{{ID: "comment-1", Revision: "1", Body: "Incoming fixture"}}, nil
@@ -70,7 +75,10 @@ func input(t *testing.T, box mailbox.Box, base mailbox.Message, id, kind, body s
 	t.Helper()
 	m := mailbox.Message{Version: 1, Kind: kind, ID: id, IssueID: base.IssueID, RunID: base.RunID, Epoch: base.Epoch, Body: body}
 	raw, _ := json.Marshal(m)
-	dir := filepath.Join(box.Root, "inbox")
+	dir := filepath.Join(box.Root, "inbox", base.IssueID)
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
 	tmp := filepath.Join(dir, ".partial")
 	if e := os.WriteFile(tmp, raw, 0600); e != nil {
 		t.Fatal(e)
@@ -147,14 +155,17 @@ func TestSymlinkAndStagedFilesIgnored(t *testing.T) {
 	}
 	m := mailbox.Message{Version: 1, Kind: "reply", ID: "test", IssueID: "i", RunID: "r", Epoch: 1, Body: "unsafe"}
 	raw, _ := json.Marshal(m)
-	in := filepath.Join(b.Root, "inbox")
+	in := filepath.Join(b.Root, "inbox", "i")
+	if e := os.MkdirAll(in, 0700); e != nil {
+		t.Fatal(e)
+	}
 	if e := os.WriteFile(filepath.Join(in, ".stage"), raw, 0600); e != nil {
 		t.Fatal(e)
 	}
 	if e := os.Symlink(".stage", filepath.Join(in, "test.json")); e != nil {
 		t.Fatal(e)
 	}
-	found, e := b.Inputs()
+	found, e := b.Inputs("i")
 	if e != nil || len(found) != 0 {
 		t.Fatalf("invalid input parsed: %v %v", found, e)
 	}
@@ -164,12 +175,12 @@ func TestWriterLock(t *testing.T) {
 	if e := b.Init(); e != nil {
 		t.Fatal(e)
 	}
-	release, e := b.Lock()
+	release, e := b.Lock("i")
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer release()
-	if r, e := b.Lock(); e == nil {
+	if r, e := b.Lock("i"); e == nil {
 		r()
 		t.Fatal("second writer admitted")
 	} else if !strings.Contains(e.Error(), "writer") {
@@ -184,7 +195,7 @@ func TestRecoveredSendingIntentDoesNotPostOrComplete(t *testing.T) {
 	}
 	base := mailbox.Message{Version: 1, IssueID: "issue-1", RunID: "run-1", Epoch: 1}
 	input(t, box, base, "lost", "reply", "server saved this")
-	pending, err := box.Inputs()
+	pending, err := box.Inputs(base.IssueID)
 	if err != nil || len(pending) != 1 {
 		t.Fatal("missing test input", err)
 	}
@@ -217,5 +228,108 @@ func TestRecoveredSendingIntentDoesNotPostOrComplete(t *testing.T) {
 	}
 	if r.count() != 1 {
 		t.Fatal("replayed an unknown write or posted a completion")
+	}
+}
+
+func TestConcurrentIssuesAndIndependentCompletion(t *testing.T) {
+	b := mailbox.Box{Root: t.TempDir()}
+	ra, rb := &fake{issue: "issue-a"}, &fake{issue: "issue-b"}
+	aOut, aErr, cancelA := run(t, b, ra, "run-a")
+	bOut, bErr, _ := run(t, b, rb, "run-b")
+	a, ob := task(t, b, "run-a"), task(t, b, "run-b")
+	if a.Epoch != 1 || ob.Epoch != 1 {
+		t.Fatal("epochs must be per issue")
+	}
+	if a.IssueID == ob.IssueID {
+		t.Fatal("expected two distinct issues")
+	}
+	// Even an identical local request ID in different issue shelves cannot
+	// cross-wire receipts, or cause A to complete when B finishes.
+	input(t, b, a, "same-id", "reply", "a reply")
+	input(t, b, ob, "same-id", "complete", "b final")
+	ar := await(t, b, func(m mailbox.Message) bool {
+		return m.RequestID == "same-id" && m.IssueID == a.IssueID && m.Status == "reply_posted"
+	})
+	br := await(t, b, func(m mailbox.Message) bool {
+		return m.RequestID == "same-id" && m.IssueID == ob.IssueID && m.Status == "completion_requested"
+	})
+	if ar.ID == br.ID {
+		t.Fatal("receipt IDs are not issue-qualified")
+	}
+	if s := <-bOut; s != "b final" {
+		t.Fatal(s)
+	}
+	if e := <-bErr; e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-aOut:
+		t.Fatal("the other run ended")
+	default:
+	}
+	input(t, b, a, "continue-a", "reply", "later a reply")
+	receipt(t, b, "continue-a", "reply_posted")
+	if ra.count() != 2 || rb.count() != 1 {
+		t.Fatalf("incorrect posts: A=%d B=%d", ra.count(), rb.count())
+	}
+	cancelA()
+	if e := <-aErr; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+}
+
+func TestSameIssueAdmissionAndRetiredRun(t *testing.T) {
+	b := mailbox.Box{Root: t.TempDir()}
+	r := new(fake)
+	_, e1, c1 := run(t, b, r, "r1")
+	task(t, b, "r1")
+	_, collision, _ := run(t, b, r, "r2")
+	if e := <-collision; e == nil {
+		t.Fatal("second worker entered same issue")
+	}
+	c1()
+	if e := <-e1; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	_, e2, c2 := run(t, b, r, "r2")
+	task(t, b, "r2")
+	c2()
+	if e := <-e2; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	_, retired, _ := run(t, b, r, "r1")
+	if e := <-retired; e == nil || !strings.Contains(e.Error(), "superseded") {
+		t.Fatalf("retired run admitted: %v", e)
+	}
+}
+
+func TestQuarantineFollowsIssueNotOtherRuns(t *testing.T) {
+	b := mailbox.Box{Root: t.TempDir()}
+	bad := &fake{issue: "a", postErr: errors.New("interrupted delivery")}
+	good := &fake{issue: "b"}
+	_, aErr, stop := run(t, b, bad, "a1")
+	a := task(t, b, "a1")
+	input(t, b, a, "uncertain-a", "reply", "maybe sent")
+	receipt(t, b, "uncertain-a", "delivery_uncertain")
+	stop()
+	if e := <-aErr; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	_, _, stop2 := run(t, b, bad, "a2")
+	defer stop2()
+	gOut, gErr, _ := run(t, b, good, "b1")
+	a2, bb := task(t, b, "a2"), task(t, b, "b1")
+	input(t, b, a2, "replacement-a", "complete", "not safe")
+	input(t, b, bb, "finish-b", "complete", "unrelated")
+	receipt(t, b, "replacement-a", "blocked_uncertain")
+	receipt(t, b, "finish-b", "completion_requested")
+	if got := <-gOut; got != "unrelated" {
+		t.Fatal(got)
+	}
+	if e := <-gErr; e != nil {
+		t.Fatal(e)
+	}
+	if bad.count() != 1 || good.count() != 1 {
+		t.Fatal("uncertain replay or blocked a separate issue")
 	}
 }

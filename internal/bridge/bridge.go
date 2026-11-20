@@ -31,11 +31,6 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 	if err := b.Box.Init(); err != nil {
 		return "", err
 	}
-	release, err := b.Box.Lock()
-	if err != nil {
-		return "", err
-	}
-	defer release()
 	t, err := b.Remote.Task(ctx)
 	if err != nil {
 		return "", err
@@ -43,11 +38,35 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 	if t.IssueID == "" {
 		return "", errors.New("run is not bound to an issue")
 	}
+	// The Daemon owns admission and starts one worker per Run. Locally, only
+	// workers for the same authoritative Issue contend for the same journal.
+	release, err := b.Box.Lock(t.IssueID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	scope, err := b.Remote.Task(ctx)
+	if err != nil {
+		return "", err
+	}
+	if scope.IssueID != t.IssueID {
+		return "", errors.New("run issue binding changed")
+	}
+	t = scope
 	s, err := b.Box.Load(t.IssueID)
 	if err != nil {
 		return "", err
 	}
 	if s.RunID != b.RunID {
+		if s.RetiredRuns[b.RunID] {
+			return "", errors.New("run binding was already superseded")
+		}
+		if s.RetiredRuns == nil {
+			s.RetiredRuns = map[string]bool{}
+		}
+		if s.RunID != "" {
+			s.RetiredRuns[s.RunID] = true
+		}
 		if s.Epoch == ^uint64(0) {
 			return "", errors.New("epoch overflow")
 		}
@@ -140,7 +159,7 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 				return "", err
 			}
 		}
-		inputs, err := b.Box.Inputs()
+		inputs, err := b.Box.Inputs(t.IssueID)
 		if err != nil {
 			return "", err
 		}
@@ -205,7 +224,7 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	}
 	// An unresolved request may already have posted. Never progress silently.
 	for _, a := range s.Actions {
-		if a.Receipt.Status == "delivery_uncertain" && a.Receipt.RunID == s.RunID {
+		if a.Receipt.Status == "delivery_uncertain" {
 			return finish("blocked_uncertain")
 		}
 	}

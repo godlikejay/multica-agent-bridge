@@ -1,4 +1,4 @@
-// Package mailbox implements the single-writer file protocol.
+// Package mailbox implements the per-Issue single-writer file protocol.
 package mailbox
 
 import (
@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -40,14 +41,15 @@ type Message struct {
 	RemoteID  string `json:"remote_id,omitempty"`
 }
 type State struct {
-	Version    int               `json:"version"`
-	IssueID    string            `json:"issue_id"`
-	RunID      string            `json:"run_id"`
-	Epoch      uint64            `json:"epoch"`
-	TaskEvent  *Message          `json:"task_event,omitempty"`
-	Completion string            `json:"completion,omitempty"`
-	Seen       map[string]string `json:"seen"`
-	Actions    map[string]Action `json:"actions"`
+	Version     int               `json:"version"`
+	IssueID     string            `json:"issue_id"`
+	RunID       string            `json:"run_id"`
+	Epoch       uint64            `json:"epoch"`
+	TaskEvent   *Message          `json:"task_event,omitempty"`
+	Completion  string            `json:"completion,omitempty"`
+	Seen        map[string]string `json:"seen"`
+	Actions     map[string]Action `json:"actions"`
+	RetiredRuns map[string]bool   `json:"retired_runs,omitempty"`
 }
 type Action struct {
 	Digest  string  `json:"digest"`
@@ -78,14 +80,21 @@ func (b Box) Init() error {
 	return nil
 }
 func (b Box) dir(d string) string { return filepath.Join(b.Root, d) }
-func (b Box) Lock() (func(), error) {
-	f, err := os.OpenFile(filepath.Join(b.dir("state"), "writer.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+func (b Box) Lock(issueID string) (func(), error) {
+	if !validID.MatchString(issueID) {
+		return nil, errors.New("invalid inbox issue id")
+	}
+	f, err := os.OpenFile(filepath.Join(b.dir("state"), ID("issue", issueID)+".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
 	}
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.New("issue writer lock must be a regular file")
+	}
 	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, errors.New("another Bridge writer is active")
+		return nil, errors.New("another Bridge writer is active for this issue")
 	}
 	return func() { f.Close() }, nil
 }
@@ -128,18 +137,18 @@ func (b Box) Emit(m Message) error {
 	}
 	p := filepath.Join(b.dir("outbox"), m.ID+".json")
 	// The same event ID can be re-emitted after a restart, but never rewritten as a different event.
-	old, err := os.ReadFile(p)
-	if err == nil {
-		var previous Message
-		if json.Unmarshal(old, &previous) != nil || previous != m {
-			return errors.New("conflicting outbox event")
-		}
-		return nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err := writeJSON(p, m, false); !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	return atomicJSON(p, m)
+	old, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	var previous Message
+	if json.Unmarshal(old, &previous) != nil || previous != m {
+		return errors.New("conflicting outbox event")
+	}
+	return syncDir(b.dir("outbox"))
 }
 
 type Input struct {
@@ -147,18 +156,53 @@ type Input struct {
 	Digest  string
 }
 
-func (b Box) Inputs() ([]Input, error) {
-	entries, err := os.ReadDir(b.dir("inbox"))
+func (b Box) Inputs(issueID string) ([]Input, error) {
+	if !validID.MatchString(issueID) {
+		return nil, errors.New("invalid inbox issue id")
+	}
+	// The mailbox root and inbox container belong to a trusted local operator
+	// and must not be renamed/replaced while the bridge is active. Open the
+	// shelf and each request without following leaf symlinks. Check that the
+	// shelf is unchanged around each request open, failing closed on a swap.
+	shelfPath := filepath.Join(b.dir("inbox"), issueID)
+	shelf, err := os.OpenFile(shelfPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
+	defer shelf.Close()
+	shelfInfo, err := shelf.Stat()
+	if err != nil {
+		return nil, err
+	}
+	unchanged := func() bool {
+		current, err := os.Lstat(shelfPath)
+		return err == nil && current.IsDir() && os.SameFile(shelfInfo, current)
+	}
+	entries, err := shelf.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	if !unchanged() {
+		return nil, errors.New("inbox issue shelf changed during scan")
+	}
+	// Preserve the order formerly supplied by os.ReadDir.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var results []Input
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") || e.IsDir() || !validID.MatchString(strings.TrimSuffix(name, ".json")) {
 			continue
 		}
-		f, err := os.OpenFile(filepath.Join(b.dir("inbox"), name), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		f, err := os.OpenFile(filepath.Join(shelfPath, name), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if !unchanged() {
+			if err == nil {
+				f.Close()
+			}
+			return nil, errors.New("inbox issue shelf changed during scan")
+		}
 		if err != nil {
 			continue
 		}
@@ -178,7 +222,7 @@ func (b Box) Inputs() ([]Input, error) {
 		if d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
 			continue
 		}
-		if m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID == "" || m.Epoch == 0 || len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" {
+		if m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID != issueID || m.Epoch == 0 || len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" {
 			continue
 		}
 		if m.Kind != "reply" && m.Kind != "complete" {
@@ -193,6 +237,10 @@ func (b Box) Inputs() ([]Input, error) {
 }
 
 func atomicJSON(path string, v any) error {
+	return writeJSON(path, v, true)
+}
+
+func writeJSON(path string, v any, replace bool) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".stage-")
 	if err != nil {
@@ -211,9 +259,21 @@ func atomicJSON(path string, v any) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("replace state: %w", err)
+	if replace {
+		if err = os.Rename(f.Name(), path); err != nil {
+			return fmt.Errorf("replace state: %w", err)
+		}
+	} else {
+		// A hard link publishes the complete staged event atomically without
+		// overwriting any event another Issue writer may already have emitted.
+		if err = os.Link(f.Name(), path); err != nil {
+			return fmt.Errorf("publish event: %w", err)
+		}
 	}
+	return syncDir(dir)
+}
+
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

@@ -5,7 +5,7 @@ and a local operator. The bridge uses Multica's Hermes ACP interface without
 running a model. It does not launch or control an agent, open a checkout, or
 execute instructions from issue text.
 
-This repository is an early, single-writer prototype. Do not connect it to a
+This repository is an early prototype with one writer per Issue. Do not connect it to a
 team or production workspace until the disposable integration suite passes and
 the operating permissions have been reviewed.
 
@@ -32,11 +32,10 @@ for Codex, Antigravity CLI and Oh My Pi.
 The standard Multica daemon owns the remote Run. An issue and observed comment
 versions appear in the outbox; only explicit local input can post a reply or
 request normal completion. Finishing a Run does not change its Issue status.
-One Run is processed at a time. A new Run for an issue increments a local epoch;
-old requests are not carried over.
+Multiple Issues can be active. Runs for one Issue are serialized. A new Run
+for that Issue increments its epoch; old requests are not carried over.
 
-The mailbox and private Bridge state are JSON files. The test setup treats the
-operator as the only Inbox writer. This is not an independent approval gate for
+The mailbox and private Bridge state are JSON files. The operator writes the Issue-specific Inbox; the runtime reads it. This is not an independent approval gate for
 an agent sharing the same user account or filesystem privileges.
 
 Licensed under [Apache-2.0](LICENSE).

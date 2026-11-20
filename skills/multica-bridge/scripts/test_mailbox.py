@@ -29,6 +29,7 @@ class MailboxCLI(unittest.TestCase):
         self.inbox = self.root / "inbox"
         self.outbox.mkdir()
         self.inbox.mkdir()
+        self.shelf = self.inbox / "issue-1"
         self.event("task-1", "task", body="private fixture issue", issue_key="FIX-1")
         self.event("comment-1", "comment", source_id="source-1", body="雪" * 12000)
         self.body = self.root / "body.txt"
@@ -116,14 +117,14 @@ class MailboxCLI(unittest.TestCase):
         self.assertEqual(d["request"]["run_id"], "run-1")
         self.assertNotIn("parent_id", d["request"])
         self.assertIn("controlling /dev/tty", self.invoke("submit", path, success=False))
-        self.assertFalse(list(self.inbox.iterdir()))
+        self.assertFalse(list(self.shelf.glob("*.json")))
         self.assertFalse((self.root / "state").exists())
 
     def test_tty_full_confirmation_and_no_clobber(self):
         d, path = self.make_draft(kind="complete")
         code, out = self.terminal(path, "not-the-id")
         self.assertEqual(code, 1, out)
-        self.assertFalse(list(self.inbox.iterdir()))
+        self.assertFalse(list(self.shelf.glob("*.json")))
         request = d["request"]
         code, out = self.terminal(path, request["id"])
         self.assertEqual(code, 0, out)
@@ -133,12 +134,13 @@ class MailboxCLI(unittest.TestCase):
         self.assertIn("\\u001b", out)
         self.assertIn("\\u202e", out)
         self.assertNotIn("\x1b", out)
-        final = self.inbox / (request["id"] + ".json")
+        final = self.shelf / (request["id"] + ".json")
         self.assertEqual(json.loads(final.read_text()), request)
         self.assertEqual(final.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(list(self.inbox.iterdir()), [final])
+        self.assertEqual(list(self.shelf.iterdir()), [final])
+        self.assertEqual(self.shelf.stat().st_mode & 0o777, 0o700)
         self.assertIn("already exists", self.invoke("submit", path, success=False))
-        fd = os.open(self.inbox, os.O_RDONLY)
+        fd = os.open(self.shelf, os.O_RDONLY)
         try:
             with self.assertRaisesRegex(cli.MailboxError, "not overwritten"):
                 cli.publish(fd, {**request, "body": "not new"})
@@ -153,7 +155,7 @@ class MailboxCLI(unittest.TestCase):
         code, out = self.terminal(path, d["request"]["id"], replaced)
         self.assertEqual(code, 1, out)
         self.assertIn("stale", out)
-        self.assertFalse(list(self.inbox.iterdir()))
+        self.assertFalse(list(self.shelf.glob("*.json")))
 
     def test_rejects_mismatches_pending_and_uncertain(self):
         d, path = self.make_draft()
@@ -162,10 +164,67 @@ class MailboxCLI(unittest.TestCase):
         self.assertIn("does not match", self.invoke("submit", path, success=False))
         path.write_text(json.dumps(d))
         pending = {**d["request"], "id": "pending-1"}
-        (self.inbox / "pending-1.json").write_text(json.dumps(pending))
+        self.shelf.mkdir(exist_ok=True)
+        (self.shelf / "pending-1.json").write_text(json.dumps(pending))
         self.assertIn("unreceipted", self.invoke("submit", path, success=False))
         self.event("uncertain-1", "receipt", request_id="pending-1", status="delivery_uncertain")
-        self.assertIn("uncertain run", self.invoke("submit", path, success=False))
+        self.assertIn("is uncertain", self.invoke("submit", path, success=False))
+        self.event("task-2", "task", epoch=2, run_id="run-2")
+        _, new_path = self.make_draft(event="task-2")
+        self.assertIn("is uncertain", self.invoke("submit", new_path, success=False))
+
+
+    def test_filters_and_independent_issue_shelves(self):
+        self.event("task-other", "task", issue_id="issue-other", run_id="run-other", epoch=8)
+        self.event("comment-other", "comment", issue_id="issue-other", run_id="run-other", epoch=8)
+        self.assertEqual({e["id"] for e in self.invoke("list", "--issue-id", "issue-other")},
+                         {"task-other", "comment-other"})
+        self.assertEqual({e["id"] for e in self.invoke("list", "--run-id", "run-1")},
+                         {"task-1", "comment-1"})
+        self.assertEqual(self.invoke("list", "--issue-id", "issue-other", "--run-id", "run-1"), [])
+        self.assertIn("invalid mailbox ID", self.invoke("list", "--issue-id", "../state", success=False))
+        second, second_path = self.make_draft(event="task-other")
+        second_id = second["request"]["id"]
+        code, out = self.terminal(second_path, second_id)
+        self.assertEqual(code, 0, out)
+        # Both an unreceipted independent issue and an obsolete root-level
+        # exact-ID collision must not block the selected issue shelf.
+        first, first_path = self.make_draft(event="task-1")
+        first_id = first["request"]["id"]
+        legacy = self.inbox / (first_id + ".json")
+        legacy.write_text(json.dumps({**first["request"], "body": "obsolete"}))
+        code, out = self.terminal(first_path, first_id)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(legacy.read_text())["body"], "obsolete")
+        self.assertEqual(json.loads((self.shelf / legacy.name).read_text()), first["request"])
+        self.assertEqual(json.loads((self.inbox / "issue-other" / (second_id + ".json")).read_text()),
+                         second["request"])
+
+    def test_refuses_issue_links_and_replacement(self):
+        item, path = self.make_draft(event="task-1")
+        target = self.root / "external-shelf"
+        target.mkdir()
+        self.shelf.symlink_to(target, target_is_directory=True)
+        self.assertIn("links are refused", self.invoke("submit", path, success=False))
+        self.shelf.unlink()
+        archived = self.inbox / "archived-issue-1"
+        def replace_shelf():
+            self.shelf.rename(archived)
+            self.shelf.mkdir()
+        code, output = self.terminal(path, item["request"]["id"], replace_shelf)
+        self.assertEqual(code, 1, output)
+        self.assertIn("issue inbox changed", output)
+        self.assertFalse(list(archived.iterdir()))
+        self.assertFalse(list(self.shelf.iterdir()))
+        self.assertFalse(list(target.iterdir()))
+
+    def test_read_only_and_draft_do_not_require_inbox(self):
+        self.inbox.rmdir()
+        self.assertEqual(len(self.invoke("list")), 2)
+        self.assertEqual(self.invoke("read", "task-1")["kind"], "task")
+        self.assertEqual(self.invoke("receipt", "missing"), [])
+        self.make_draft()
+        self.assertFalse(self.inbox.exists())
 
 
 if __name__ == "__main__":

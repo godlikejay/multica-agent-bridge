@@ -5,10 +5,14 @@
   Validate against matching Server and Daemon versions. Version baseline:
   upstream `v0.11.1`; contract reviewed at
   [220791d](https://github.com/multica-ai/multica/tree/220791df038b0a507556d91d7be899c4ba8a463d).
-- **Files before a database.** A single writer and a private JSON snapshot
-  suffice for the first loop. Keep the wire protocol independent of storage;
+- **Files before a database.** Private JSON snapshots and one writer per Issue
+  suffice for concurrent Runs across distinct Issues. Keep the wire protocol independent of storage;
   revisit SQLite if multi-record transactions, state size or recovery become
   unwieldy. Do not add multi-machine writing to this design by accident.
+- **Separate admission, routing, and work.** The Daemon admits Runs and owns
+  the slot limit. Bridge workers use independent Issue shelves and locks;
+  the operator can switch local tasks without running multiple coding agents.
+  An idle bridge still occupies its daemon slot until the Run terminates.
 - **Normal completion is explicit.** A separate, local complete request
   authorizes the final comment. A remote cancel, idle timeout, or replacement
   Run is not permission to reply, restart local work, or update Issue state.

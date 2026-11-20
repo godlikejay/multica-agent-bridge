@@ -80,6 +80,9 @@ cd ..
    with Hermes selected; no model key, real repo or external MCP servers.
    Use `/workspaces` only. A repo-less/local-directory task may require a
    human confirmation in the runtime UI; do not claim bootstrap bypasses it.
+   For parallel acceptance, set that Agent's max concurrent tasks to at least
+   2 and keep the Runtime cap unset or at least 2. The daemon in this Compose
+   project defaults to 2 via `BRIDGE_MAX_ACTIVE_RUNS`.
 
 ## Single command after manual assignment
 
@@ -110,7 +113,8 @@ upstream API integration verification; no guessed endpoint is used here.
 ./e2e/run.sh fixture e2e/.local/bridge/outbox/TASK_EVENT_ID.json
 ```
 
-   It only copies scope IDs from the event, never executes its body. Require
+   It copies scope IDs from the event, creates the host-side
+   `inbox/<issue_id>/` directory, and never executes the event body. Require
    `reply_posted`, then inspect the reply on that **same issue/thread** in UI.
 4. While that Run is active, add a UI comment containing `E2E_SYNTHETIC_ONLY`.
    Wait for `kind:comment` with its `source_id`. Use that event with `fixture`
@@ -129,6 +133,27 @@ upstream API integration verification; no guessed endpoint is used here.
    verification, not completion. Check final response is visible in UI too.
 6. Record image digests, Multica/bridge versions, Issue/Run IDs, receipt statuses
    and server completion. Exclude tokens/cookies/config files from evidence.
+
+### Two Issues in parallel (same synthetic Agent)
+
+Assign two separate marked synthetic Issues A and B to the **same Agent** on
+the same runtime; wait for two initial task events and confirm the IDs against
+the UI. Leave both Runs active, then run:
+
+```sh
+./e2e/run.sh parallel \
+  e2e/.local/bridge/outbox/TASK_A_EVENT_ID.json \
+  e2e/.local/bridge/outbox/TASK_B_EVENT_ID.json
+```
+
+The runner requires both exact Runs to already be reported `running` by the
+server before writing any inbox request. It replies to A, submits a separate
+completion for B, verifies B reaches `completed`, then checks that A still
+reports `running`. Review the UI to confirm each comment landed on only its
+intended Issue. It leaves A running by default; pass `--finish-a` only if you
+also want the runner to explicitly complete A **after** isolation is verified.
+If either task stays queued, inspect all three limits (Agent, Runtime and
+Daemon) and runtime logs; that is not a parallel pass.
 
 ### Restart / dedupe / failures (separate synthetic Runs)
 

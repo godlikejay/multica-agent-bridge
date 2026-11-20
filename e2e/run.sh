@@ -40,6 +40,12 @@ case "${1:-help}" in
     # run.sh executes in e2e; accept the repository-relative example path too.
     case "$event" in e2e/*) event=${event#e2e/} ;; esac
     python3 fixture.py smoke "$event" ;;
+  parallel)
+    [ "$#" -ge 3 ] || { echo 'Provide two synthetic task events: ./e2e/run.sh parallel TASK_A_JSON TASK_B_JSON [--finish-a].' >&2; exit 2; }
+    a=$2 b=$3; shift 3
+    case "$a" in e2e/*) a=${a#e2e/} ;; esac
+    case "$b" in e2e/*) b=${b#e2e/} ;; esac
+    python3 fixture.py parallel "$a" "$b" "$@" ;;
   fixture|verify)
     cmd=$1; shift
     if [ "$cmd" = fixture ] && [ "$#" -gt 0 ]; then
@@ -50,5 +56,5 @@ case "${1:-help}" in
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; test state retained. No volumes/files deleted.' ;;
-  *) echo 'Usage: ./e2e/run.sh init|up|login|workspace UUID|runtime|status|health|smoke TASK_JSON|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
+  *) echo 'Usage: ./e2e/run.sh init|up|login|workspace UUID|runtime|status|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
 esac

@@ -72,7 +72,8 @@ def json_file(path, directory=None):
 
 def valid_binding(obj):
     return (type(obj.get("version")) is int and obj["version"] == 1
-            and all(isinstance(obj.get(k), str) and bool(obj[k]) for k in BINDING[:2])
+            and valid_id(obj.get("issue_id"))
+            and isinstance(obj.get("run_id"), str) and bool(obj["run_id"])
             and type(obj.get("epoch")) is int and 0 < obj["epoch"] < 2**64)
 
 
@@ -134,7 +135,7 @@ def draft(outbox, event_id, kind, body_file):
     }}
 
 
-def validate(outbox, inbox, item):
+def resolve_request(outbox, item):
     if set(item) != {"event_id", "request"} or not isinstance(item["request"], dict):
         raise MailboxError("expected a draft with event_id and request")
     request = item["request"]
@@ -146,6 +147,10 @@ def validate(outbox, inbox, item):
     e = load_event(outbox, item["event_id"])
     if e["kind"] not in {"task", "comment"} or bind(e) != bind(request):
         raise MailboxError("draft does not match the named task/comment event")
+    return request
+
+
+def validate(outbox, inbox, request):
     snapshots = set()
     receipt_ids = set()
     for _, other in events(outbox):
@@ -153,6 +158,8 @@ def validate(outbox, inbox, item):
             continue
         if other["kind"] == "task" and other["epoch"] >= request["epoch"]:
             snapshots.add(bind(other))
+        if other["kind"] == "receipt" and other.get("status") == "delivery_uncertain":
+            raise MailboxError("an earlier delivery on this issue is uncertain; inspect Multica")
         if other["kind"] == "receipt" and bind(other) == bind(request):
             if other.get("status") in tuple(TERMINAL):
                 raise MailboxError("local receipts show a completed or uncertain run; inspect Multica")
@@ -176,7 +183,21 @@ def validate(outbox, inbox, item):
             if (valid_binding(other) and bind(other) == bind(request)
                     and other.get("id") == entry.name[:-5] and other["id"] not in receipt_ids):
                 raise MailboxError("this run has an unreceipted request; inspect it before submitting another")
-    return request
+
+
+def issue_inbox(inbox, issue_id, create=False):
+    name = require_id(issue_id)
+    if create:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=inbox)
+        except FileExistsError:
+            pass
+        else:
+            os.fsync(inbox)
+    try:
+        return os.open(name, DIR_FLAGS, dir_fd=inbox)
+    except OSError as exc:
+        raise MailboxError("issue inbox must be a real directory; links are refused") from exc
 
 
 def confirm(request, event_id):
@@ -237,6 +258,8 @@ def parser():
     commands = p.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)
+    listing.add_argument("--issue-id")
+    listing.add_argument("--run-id")
     commands.add_parser("read").add_argument("event_id")
     commands.add_parser("receipt").add_argument("request_id")
     d = commands.add_parser("draft")
@@ -258,7 +281,12 @@ def run(args):
             if args.command == "list":
                 if not 1 <= args.limit <= MAX_LIST:
                     raise MailboxError(f"limit must be 1–{MAX_LIST}")
-                newest = heapq.nlargest(args.limit, events(outbox), key=lambda x: (x[0], x[1]["id"]))
+                issue_id = require_id(args.issue_id) if args.issue_id is not None else None
+                run_id = require_id(args.run_id) if args.run_id is not None else None
+                selected = (x for x in events(outbox)
+                            if (issue_id is None or x[1]["issue_id"] == issue_id)
+                            and (run_id is None or x[1]["run_id"] == run_id))
+                newest = heapq.nlargest(args.limit, selected, key=lambda x: (x[0], x[1]["id"]))
                 emit([metadata(e) for _, e in newest])
             elif args.command == "read":
                 e = load_event(outbox, args.event_id)
@@ -278,14 +306,27 @@ def run(args):
                 emit(draft(outbox, args.event_id, args.kind, args.body_file))
             elif args.command == "submit":
                 item = json_file(args.draft_path)
+                request = resolve_request(outbox, item)
                 inbox = os.open("inbox", DIR_FLAGS, dir_fd=root_fd)
                 try:
-                    request = validate(outbox, inbox, item)
-                    if not confirm(request, item["event_id"]):
-                        raise MailboxError("submission cancelled; nothing was written")
-                    # Re-read latest outbox evidence after waiting for operator input.
-                    validate(outbox, inbox, item)
-                    publish(inbox, request)
+                    shelf = issue_inbox(inbox, request["issue_id"], create=True)
+                    try:
+                        validate(outbox, shelf, request)
+                        if not confirm(request, item["event_id"]):
+                            raise MailboxError("submission cancelled; no request was written")
+                        # Re-check the named event and latest evidence after operator input.
+                        # The shelf must still be the same real directory, not a link or replacement.
+                        resolve_request(outbox, item)
+                        verified = issue_inbox(inbox, request["issue_id"])
+                        try:
+                            if not os.path.samestat(os.fstat(shelf), os.fstat(verified)):
+                                raise MailboxError("issue inbox changed during confirmation")
+                            validate(outbox, verified, request)
+                            publish(verified, request)
+                        finally:
+                            os.close(verified)
+                    finally:
+                        os.close(shelf)
                     emit({"request_id": request["id"], "status": "submitted_to_local_inbox"})
                 finally:
                     os.close(inbox)
