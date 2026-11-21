@@ -1,0 +1,144 @@
+# All services use invented, disposable Multica data. No outside service URLs.
+name: multica-bridge-multi-e2e
+
+x-postgres: &postgres
+  image: pgvector/pgvector:pg17
+  healthcheck:
+    test: [CMD-SHELL, "pg_isready -U multica_e2e -d multica_e2e"]
+    interval: 3s
+    timeout: 3s
+    retries: 30
+
+x-postgres-env: &postgres-env
+  POSTGRES_DB: multica_e2e
+  POSTGRES_USER: multica_e2e
+
+x-backend: &backend
+  image: ghcr.io/multica-ai/multica-backend:v0.11.1
+
+x-backend-env: &backend-env
+  PORT: "8080"
+  APP_ENV: development
+  MULTICA_DEV_VERIFICATION_CODE: "888888"
+  ALLOW_SIGNUP: "true"
+  DO_NOT_TRACK: "true"
+  ANALYTICS_DISABLED: "true"
+  MULTICA_CLOUD_URL: ""
+  MULTICA_LLM_API_KEY: ""
+  MULTICA_LLM_BASE_URL: ""
+
+x-frontend: &frontend
+  image: ghcr.io/multica-ai/multica-web:v0.11.1
+
+x-minimal: &minimal
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+x-proxy: &proxy
+  <<: *minimal
+  image: multica-bridge-e2e:local-proxy
+  build: ../proxy
+
+services:
+  postgres-a:
+    <<: *postgres
+    networks: [a]
+    environment:
+      <<: *postgres-env
+      POSTGRES_PASSWORD: ${A_DB_PASSWORD:?run init}
+    volumes: [database-a:/var/lib/postgresql/data]
+  backend-a:
+    <<: *backend
+    depends_on:
+      postgres-a: {condition: service_healthy}
+    networks:
+      a: {aliases: [backend]}
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgres://multica_e2e:${A_DB_PASSWORD:?run init}@postgres-a:5432/multica_e2e?sslmode=disable
+      JWT_SECRET: ${A_JWT_SECRET:?run init}
+      FRONTEND_ORIGIN: http://localhost:13100
+      MULTICA_APP_URL: http://localhost:13100
+      MULTICA_DAEMON_SERVER_URL: http://backend-a:8080
+    volumes: [uploads-a:/app/data/uploads]
+  frontend-a:
+    <<: *frontend
+    depends_on: [backend-a]
+    networks:
+      a: {aliases: [frontend]}
+    environment:
+      HOSTNAME: 0.0.0.0
+      REMOTE_API_URL: http://backend-a:8080
+  proxy-a:
+    <<: *proxy
+    depends_on: [backend-a, frontend-a]
+    networks: [a, publish]
+    ports: ["127.0.0.1:18180:18080", "127.0.0.1:13100:13000"]
+
+  postgres-b:
+    <<: *postgres
+    networks: [b]
+    environment:
+      <<: *postgres-env
+      POSTGRES_PASSWORD: ${B_DB_PASSWORD:?run init}
+    volumes: [database-b:/var/lib/postgresql/data]
+  backend-b:
+    <<: *backend
+    depends_on:
+      postgres-b: {condition: service_healthy}
+    networks:
+      b: {aliases: [backend]}
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgres://multica_e2e:${B_DB_PASSWORD:?run init}@postgres-b:5432/multica_e2e?sslmode=disable
+      JWT_SECRET: ${B_JWT_SECRET:?run init}
+      FRONTEND_ORIGIN: http://localhost:13200
+      MULTICA_APP_URL: http://localhost:13200
+      MULTICA_DAEMON_SERVER_URL: http://backend-b:8080
+    volumes: [uploads-b:/app/data/uploads]
+  frontend-b:
+    <<: *frontend
+    depends_on: [backend-b]
+    networks:
+      b: {aliases: [frontend]}
+    environment:
+      HOSTNAME: 0.0.0.0
+      REMOTE_API_URL: http://backend-b:8080
+  proxy-b:
+    <<: *proxy
+    depends_on: [backend-b, frontend-b]
+    networks: [b, publish]
+    ports: ["127.0.0.1:18280:18080", "127.0.0.1:13200:13000"]
+
+  runtime:
+    <<: *minimal
+    profiles: [runtime]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    user: "${LOCAL_UID:?run init}:${LOCAL_GID:?run init}"
+    tmpfs: [/tmp]
+    networks: [a, b]
+    entrypoint: [/usr/local/bin/multica-bridge]
+    command: [serve, --config, /etc/multica-bridge/connections.json]
+    environment:
+      MULTICA_BRIDGE_TEST_HTTP: "1"
+    volumes:
+      - ./.local/connections.json:/etc/multica-bridge/connections.json:ro
+      - ./.local/runtime:/bridge-runtime
+      - ./.local/bridge/inbox:/bridge/inbox:ro
+      - ./.local/bridge/outbox:/bridge/outbox
+      - ./.local/bridge/state:/bridge/state
+      - ./.local/secrets:/run/secrets:ro
+
+networks:
+  a: {internal: true}
+  b: {internal: true}
+  publish: {driver: bridge}
+volumes:
+  database-a:
+  database-b:
+  uploads-a:
+  uploads-b:

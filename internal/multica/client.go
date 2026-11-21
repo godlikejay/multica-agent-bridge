@@ -29,6 +29,8 @@ const maxReply = 256 << 10
 type Config struct {
 	URL, Token, WorkspaceID, AgentID, RunID string
 	ExpectedRuntimeID                       string
+	// A trusted supervisor route ignores task-controlled transport settings.
+	TrustedRoute, SyntheticHTTP bool
 }
 
 // String and GoString keep ordinary diagnostics from accidentally printing credentials.
@@ -69,9 +71,14 @@ type Client struct {
 }
 
 func FromEnv() (Config, error) {
-	c := Config{URL: os.Getenv("MULTICA_SERVER_URL"), Token: os.Getenv("MULTICA_TOKEN"), WorkspaceID: os.Getenv("MULTICA_WORKSPACE_ID"), AgentID: os.Getenv("MULTICA_AGENT_ID"), RunID: os.Getenv("MULTICA_TASK_ID"), ExpectedRuntimeID: os.Getenv("BRIDGE_EXPECTED_RUNTIME_ID")}
+	c := TaskConfigFromEnv()
 	_, err := New(c)
 	return c, err
+}
+
+// TaskConfigFromEnv reads the daemon-issued values; callers must validate them with New.
+func TaskConfigFromEnv() Config {
+	return Config{URL: os.Getenv("MULTICA_SERVER_URL"), Token: os.Getenv("MULTICA_TOKEN"), WorkspaceID: os.Getenv("MULTICA_WORKSPACE_ID"), AgentID: os.Getenv("MULTICA_AGENT_ID"), RunID: os.Getenv("MULTICA_TASK_ID"), ExpectedRuntimeID: os.Getenv("BRIDGE_EXPECTED_RUNTIME_ID")}
 }
 func validID(s string) bool {
 	if len(s) == 0 || len(s) > 128 {
@@ -99,7 +106,11 @@ func New(c Config) (*Client, error) {
 	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLoopback() {
 		loopback = true
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && (loopback || (os.Getenv("BRIDGE_ALLOW_TEST_HTTP") == "1" && u.Hostname() == "backend"))) {
+	plainAllowed := loopback || (os.Getenv("BRIDGE_ALLOW_TEST_HTTP") == "1" && u.Hostname() == "backend")
+	if c.TrustedRoute {
+		plainAllowed = c.SyntheticHTTP && (u.Hostname() == "backend-a" || u.Hostname() == "backend-b")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && plainAllowed) {
 		return nil, fail("insecure_server_url")
 	}
 	for _, s := range strings.Split(u.Path, "/") {
@@ -110,6 +121,11 @@ func New(c Config) (*Client, error) {
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = ""
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if c.TrustedRoute {
+		// Custom agent environments can carry HTTP(S)_PROXY. Do not let them
+		// redirect a route pinned by the local supervisor.
+		tr.Proxy = nil
+	}
 	tr.MaxResponseHeaderBytes = 64 << 10
 	return &Client{cfg: c, base: u, http: &http.Client{Transport: tr, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }

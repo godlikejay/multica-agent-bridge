@@ -27,6 +27,10 @@ with Compose. See [Docker setup](docs/deployment.md) for configuration and
 one-time login, and the [agent installation and mailbox tool](docs/agent-integration.md)
 for Codex, Antigravity CLI and Oh My Pi.
 
+To connect to multiple Multica instances from **one runtime container**, see
+[Multi-connection Docker setup](docs/multi-connection.md) and the
+[two-service acceptance runbook](e2e/multi/README.md).
+
 ## Scope
 
 The standard Multica daemon owns the remote Run. An issue and observed comment

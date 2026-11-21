@@ -24,7 +24,13 @@ const maxState = 16 * 1024 * 1024
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 
+type Scope struct {
+	ConnectionID string `json:"connection_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+}
+
 type Message struct {
+	Scope
 	Version      int    `json:"version"`
 	Kind         string `json:"kind"`
 	ID           string `json:"id"`
@@ -43,6 +49,7 @@ type Message struct {
 	LastSyncedAt string `json:"last_synced_at,omitempty"`
 }
 type State struct {
+	Scope
 	Version      int               `json:"version"`
 	IssueID      string            `json:"issue_id"`
 	RunID        string            `json:"run_id"`
@@ -68,7 +75,13 @@ type SendIntent struct {
 	Marker        string `json:"marker"`
 	PayloadDigest string `json:"payload_digest"`
 }
-type Box struct{ Root string }
+type Box struct {
+	Root, Connection, Workspace string
+}
+
+func (b Box) scope() Scope {
+	return Scope{ConnectionID: b.Connection, WorkspaceID: b.Workspace}
+}
 
 func ID(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
@@ -78,21 +91,61 @@ func (b Box) Init() error {
 	if !filepath.IsAbs(b.Root) {
 		return errors.New("BRIDGE_ROOT must be an absolute path")
 	}
-	for _, path := range []string{b.Root, b.dir("inbox"), b.dir("outbox"), b.dir("state")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
+	if b.scope() != (Scope{}) && (!validID.MatchString(b.Connection) || !validID.MatchString(b.Workspace)) {
+		return errors.New("invalid connection or workspace mailbox scope")
+	}
+	if err := os.MkdirAll(b.Root, 0700); err != nil {
+		return err
+	}
+	if err := realDir(b.Root); err != nil {
+		return err
+	}
+	for _, kind := range []string{"inbox", "outbox", "state"} {
+		base := filepath.Join(b.Root, kind)
+		if kind == "inbox" && b.Connection != "" {
+			// Inbox is a read-only bind mount. The operator creates its scopes.
+			if err := realDir(base); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := makeDir(base); err != nil {
 			return err
 		}
-		f, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if !f.IsDir() {
-			return errors.New("mailbox paths must be real directories")
+		if b.Connection != "" {
+			if err := makeDir(filepath.Join(base, b.Connection)); err != nil {
+				return err
+			}
+			if err := makeDir(b.dir(kind)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
-func (b Box) dir(d string) string { return filepath.Join(b.Root, d) }
+
+func realDir(path string) error {
+	f, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !f.IsDir() {
+		return errors.New("mailbox paths must be real directories")
+	}
+	return nil
+}
+
+func makeDir(path string) error {
+	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return realDir(path)
+}
+
+func (b Box) dir(kind string) string {
+	return filepath.Join(b.Root, kind, b.Connection, b.Workspace)
+}
+
 func (b Box) Lock(issueID string) (func(), error) {
 	if !validID.MatchString(issueID) {
 		return nil, errors.New("invalid inbox issue id")
@@ -115,7 +168,7 @@ func (b Box) statePath(issue string) string {
 	return filepath.Join(b.dir("state"), ID("issue", issue)+".json")
 }
 func (b Box) Load(issue string) (State, error) {
-	s := State{Version: 1, IssueID: issue, Seen: map[string]string{}, Actions: map[string]Action{}}
+	s := State{Scope: b.scope(), Version: 1, IssueID: issue, Seen: map[string]string{}, Actions: map[string]Action{}}
 	raw, err := os.ReadFile(b.statePath(issue))
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -126,15 +179,21 @@ func (b Box) Load(issue string) (State, error) {
 	if len(raw) > maxState {
 		return s, errors.New("state exceeds size limit")
 	}
-	if err = json.Unmarshal(raw, &s); err != nil {
+	// Decode into an empty value so missing scope cannot inherit the expected scope.
+	var saved State
+	if err = json.Unmarshal(raw, &saved); err != nil {
 		return s, errors.New("invalid saved state")
 	}
-	if s.Version != 1 || s.IssueID != issue || s.Seen == nil || s.Actions == nil {
+	s = saved
+	if s.Scope != b.scope() || s.Version != 1 || s.IssueID != issue || s.Seen == nil || s.Actions == nil {
 		return s, errors.New("saved state identity or version mismatch")
 	}
 	return s, nil
 }
 func (b Box) Save(s State) error {
+	if s.Scope != b.scope() {
+		return errors.New("invalid saved state scope")
+	}
 	raw, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -145,6 +204,10 @@ func (b Box) Save(s State) error {
 	return atomicJSON(b.statePath(s.IssueID), json.RawMessage(raw))
 }
 func (b Box) Emit(m Message) error {
+	if m.Scope != (Scope{}) && m.Scope != b.scope() {
+		return errors.New("invalid outbox scope")
+	}
+	m.Scope = b.scope()
 	if !validID.MatchString(m.ID) {
 		return errors.New("invalid event id")
 	}
@@ -177,6 +240,15 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 	// and must not be renamed/replaced while the bridge is active. Open the
 	// shelf and each request without following leaf symlinks. Check that the
 	// shelf is unchanged around each request open, failing closed on a swap.
+	if b.Connection != "" {
+		for _, p := range []string{filepath.Join(b.Root, "inbox", b.Connection), b.dir("inbox")} {
+			if err := realDir(p); errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			} else if err != nil {
+				return nil, err
+			}
+		}
+	}
 	shelfPath := filepath.Join(b.dir("inbox"), issueID)
 	shelf, err := os.OpenFile(shelfPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
 	if errors.Is(err, os.ErrNotExist) {
@@ -235,7 +307,7 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
 			continue
 		}
-		if m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID != issueID || m.Epoch == 0 || len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" {
+		if m.Scope != b.scope() || m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID != issueID || m.Epoch == 0 || len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" {
 			continue
 		}
 		if m.Kind != "reply" && m.Kind != "complete" {

@@ -232,3 +232,30 @@ func TestUnsupportedInputsAndRedactedHandlerFailure(t *testing.T) {
 		t.Fatalf("unexpected task handler count: %d", calls)
 	}
 }
+
+func TestDaemonPipeClosureStopsActiveWorker(t *testing.T) {
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	h := newHarness(t, context.Background(), func(ctx context.Context, _ Prompt) (string, error) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return "", ctx.Err()
+	})
+	sess := h.setup(t)
+	h.send(t, 3, "session/prompt", prompt(sess))
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	// If the daemon crashes, the OS closes the write end of this stdio pipe.
+	if err := h.input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.wait(t, nil)
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("active worker did not observe cancellation")
+	}
+}

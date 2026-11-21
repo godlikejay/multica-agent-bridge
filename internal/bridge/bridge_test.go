@@ -55,7 +55,7 @@ func await(t *testing.T, box mailbox.Box, match func(mailbox.Message) bool) mail
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		files, _ := filepath.Glob(filepath.Join(box.Root, "outbox", "*.json"))
+		files, _ := filepath.Glob(filepath.Join(box.Root, "outbox", box.Connection, box.Workspace, "*.json"))
 		for _, f := range files {
 			raw, e := os.ReadFile(f)
 			if e != nil {
@@ -73,9 +73,9 @@ func await(t *testing.T, box mailbox.Box, match func(mailbox.Message) bool) mail
 }
 func input(t *testing.T, box mailbox.Box, base mailbox.Message, id, kind, body string) {
 	t.Helper()
-	m := mailbox.Message{Version: 1, Kind: kind, ID: id, IssueID: base.IssueID, RunID: base.RunID, Epoch: base.Epoch, Body: body}
+	m := mailbox.Message{Scope: base.Scope, Version: 1, Kind: kind, ID: id, IssueID: base.IssueID, RunID: base.RunID, Epoch: base.Epoch, Body: body}
 	raw, _ := json.Marshal(m)
-	dir := filepath.Join(box.Root, "inbox", base.IssueID)
+	dir := filepath.Join(box.Root, "inbox", box.Connection, box.Workspace, base.IssueID)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		t.Fatal(e)
 	}
@@ -534,5 +534,51 @@ func TestTemporaryPresendLookupDoesNotQuarantineOrDuplicate(t *testing.T) {
 	s, err := box.Load(a.IssueID)
 	if err != nil || s.Actions["preflight-complete"].Receipt.Status != "completion_requested" || s.LastSyncedAt == "" {
 		t.Fatalf("incorrect persisted result: %v", err)
+	}
+}
+
+func TestIndependentEndpointsWithIdenticalRemoteIDs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "inbox"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := mailbox.Box{Root: root, Connection: "cloud", Workspace: "ws"}
+	b := mailbox.Box{Root: root, Connection: "work", Workspace: "ws"}
+	ra, rb := new(fake), new(fake)
+	_, aErr, stopA := run(t, a, ra, "same-run")
+	bOut, bErr, _ := run(t, b, rb, "same-run")
+	ta, tb := task(t, a, "same-run"), task(t, b, "same-run")
+	if ta.ID != tb.ID || ta.IssueID != tb.IssueID || ta.Scope == tb.Scope {
+		t.Fatal("expected identical remote IDs in two distinct local scopes")
+	}
+
+	// Move an A-bound action into the B inbox without changing its payload.
+	input(t, b, ta, "foreign", "complete", "never post this")
+	input(t, b, tb, "valid-b", "reply", "first B reply")
+	receipt(t, b, "valid-b", "reply_posted")
+	if ra.count() != 0 || rb.count() != 1 {
+		t.Fatal("a copied request crossed connections")
+	}
+
+	stopA()
+	if err := <-aErr; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	input(t, b, tb, "done-b", "complete", "B final while A stopped")
+	receipt(t, b, "done-b", "completion_requested")
+	if got, err := <-bOut, <-bErr; err != nil || got != "B final while A stopped" || rb.count() != 2 {
+		t.Fatalf("healthy worker did not finish independently: %q, %v, posts=%d", got, err, rb.count())
+	}
+
+	_, newAErr, stopNewA := run(t, a, ra, "replacement-run")
+	ta2 := task(t, a, "replacement-run")
+	if ta2.Epoch != ta.Epoch+1 {
+		t.Fatal("A did not preserve its own ledger across restart")
+	}
+	input(t, a, ta2, "fresh-a", "reply", "A recovered")
+	receipt(t, a, "fresh-a", "reply_posted")
+	stopNewA()
+	if err := <-newAErr; !errors.Is(err, context.Canceled) || ra.count() != 1 {
+		t.Fatalf("unexpected A restart outcome: %v, posts=%d", err, ra.count())
 	}
 }

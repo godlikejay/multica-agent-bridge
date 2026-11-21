@@ -312,3 +312,25 @@ func TestReplyPreflightReadFailureIsDistinguishedFromWriteLoss(t *testing.T) {
 		t.Fatalf("preflight result %+v, posts=%d", e, posts)
 	}
 }
+
+func TestTrustedRouteRejectsLegacyHTTPOptInAndDisablesProxy(t *testing.T) {
+	t.Setenv("BRIDGE_ALLOW_TEST_HTTP", "1")
+	c := config()
+	c.TrustedRoute = true
+	c.URL = "http://backend-a:8080"
+	if _, err := New(c); err == nil {
+		t.Fatal("legacy env enabled HTTP for supervised task")
+	}
+	c.SyntheticHTTP = true
+	client, err := New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http.Transport.(*http.Transport).Proxy != nil {
+		t.Fatal("supervised task inherited an environment proxy")
+	}
+	c.URL = "http://example.invalid"
+	if _, err := New(c); err == nil {
+		t.Fatal("test opt-in allowed arbitrary HTTP")
+	}
+}

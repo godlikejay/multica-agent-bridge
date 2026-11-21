@@ -1,0 +1,44 @@
+name: multica-agent-bridge-multi
+services:
+  bridge:
+    image: ${BRIDGE_IMAGE:-multica-agent-bridge:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${BRIDGE_UID:?set BRIDGE_UID to your non-root host user ID}:${BRIDGE_GID:?set BRIDGE_GID to your host group ID}"
+    entrypoint: ["/usr/local/bin/multica-bridge"]
+    command: ["serve", "--config", "/etc/multica-bridge/connections.json"]
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./.bridge-multi/connections.json
+        target: /etc/multica-bridge/connections.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge-multi/secrets
+        target: /run/secrets
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge-multi/runtime
+        target: /bridge-runtime
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge-multi/inbox
+        target: /bridge/inbox
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge-multi/outbox
+        target: /bridge/outbox
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.bridge-multi/state
+        target: /bridge/state
+        bind: {create_host_path: false}

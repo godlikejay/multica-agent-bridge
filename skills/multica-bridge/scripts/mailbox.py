@@ -13,6 +13,7 @@ import stat
 import sys
 import unicodedata
 import uuid
+from typing import NamedTuple
 
 MAX_FILE = 256 * 1024
 MAX_BODY = 32 * 1024
@@ -20,6 +21,7 @@ MAX_READ_BODY = 32 * 1024
 MAX_LIST = 100
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z", re.ASCII)
 BINDING = ("issue_id", "run_id", "epoch")
+SCOPE_FIELDS = ("connection_id", "workspace_id")
 EVENTS = {"task", "comment", "receipt", "sync"}
 UNREAD_KINDS = {"task", "comment"}
 KINDS = {"reply", "complete"}
@@ -30,6 +32,21 @@ FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 class MailboxError(Exception):
     pass
+
+
+class Outbox(NamedTuple):
+    directory: int
+    scope: tuple
+
+
+def scope_fields(scope):
+    return dict(zip(SCOPE_FIELDS, scope))
+
+
+def matches_scope(record, scope):
+    if not scope:
+        return not any(key in record for key in SCOPE_FIELDS)
+    return all(record.get(key) == value for key, value in scope_fields(scope).items())
 
 
 def valid_id(v):
@@ -86,7 +103,9 @@ def bind(obj):
 
 def load_event(outbox, event_id):
     require_id(event_id)
-    e = json_file(event_id + ".json", outbox)
+    e = json_file(event_id + ".json", outbox.directory)
+    if not matches_scope(e, outbox.scope):
+        raise MailboxError("event connection or workspace does not match selected mailbox")
     if not valid_binding(e) or e.get("id") != event_id or e.get("kind") not in tuple(EVENTS):
         raise MailboxError("invalid outbox event")
     return e
@@ -94,7 +113,7 @@ def load_event(outbox, event_id):
 
 def events(outbox):
     # Ignore invalid/partial files like the Bridge. Never follow file links.
-    with os.scandir(outbox) as it:
+    with os.scandir(outbox.directory) as it:
         for entry in it:
             if not entry.name.endswith(".json") or not valid_id(entry.name[:-5]):
                 continue
@@ -107,7 +126,7 @@ def events(outbox):
 
 
 def metadata(e):
-    keys = ("id", "kind", *BINDING, "issue_key", "source_id", "revision",
+    keys = ("id", "kind", *BINDING, *SCOPE_FIELDS, "issue_key", "source_id", "revision",
             "request_id", "status", "remote_id", "observed_at", "last_synced_at")
     return {k: (e[k][:256] if isinstance(e[k], str) else e[k])
             for k in keys if k in e and type(e[k]) in (str, int)}
@@ -134,7 +153,7 @@ def draft(outbox, event_id, kind, body_file):
     body = bounded_body(file_bytes(body_file, MAX_BODY).decode("utf-8"))
     return {"event_id": event_id, "request": {
         "version": 1, "id": uuid.uuid4().hex, "kind": kind, "body": body,
-        **dict(zip(BINDING, bind(e))), **parent_fields(e, kind),
+        **dict(zip(BINDING, bind(e))), **scope_fields(outbox.scope), **parent_fields(e, kind),
     }}
 
 
@@ -151,7 +170,9 @@ def resolve_request(outbox, item):
     if set(item) != {"event_id", "request"} or not isinstance(item["request"], dict):
         raise MailboxError("expected a draft with event_id and request")
     request = item["request"]
-    required = {"version", "id", "kind", "body", *BINDING}
+    if not matches_scope(request, outbox.scope):
+        raise MailboxError("draft connection or workspace does not match selected mailbox")
+    required = {"version", "id", "kind", "body", *BINDING, *scope_fields(outbox.scope)}
     if (not required <= set(request) or set(request) - required - {"parent_id"}
             or not valid_binding(request) or request["kind"] not in tuple(KINDS)):
         raise MailboxError("invalid draft request fields")
@@ -175,7 +196,7 @@ def rebind_draft(outbox, item, event_id):
         raise MailboxError("rebind must select a newer epoch for the same issue")
     # Choosing a different event in the same target run must not make a
     # second submission of the original draft possible.
-    material = json.dumps(["rebind-v1", original["id"], *bind(e)], ensure_ascii=True)
+    material = json.dumps(["rebind-v1", original["id"], *outbox.scope, *bind(e)], ensure_ascii=True)
     rid = hashlib.sha256(material.encode("ascii")).hexdigest()
     request = {k: v for k, v in original.items() if k != "parent_id"}
     request.update(dict(zip(BINDING, bind(e))))
@@ -237,7 +258,7 @@ def validate(outbox, inbox, request):
                 other = json_file(entry.name, inbox)
             except (OSError, MailboxError):
                 continue
-            if (valid_binding(other) and bind(other) == bind(request)
+            if (matches_scope(other, outbox.scope) and valid_binding(other) and bind(other) == bind(request)
                     and other.get("id") == entry.name[:-5] and other["id"] not in receipt_ids):
                 raise MailboxError("this run has an unreceipted request; inspect it before submitting another")
 
@@ -312,18 +333,70 @@ def publish(inbox, request):
         os.unlink(temporary, dir_fd=inbox)
 
 
-def pickup_dir(root_fd, create=False):
-    if create:
-        try:
-            os.mkdir("pickup", mode=0o700, dir_fd=root_fd)
-        except FileExistsError:
-            pass
+def scoped_dir(root_fd, name, scope, create=False, optional=False):
+    # Open each descendant relative to an already checked directory, refusing
+    # symlinks at every namespace component.
+    fd = os.dup(root_fd)
     try:
-        return os.open("pickup", DIR_FLAGS, dir_fd=root_fd)
+        for component in (name, *scope):
+            if create:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(fd)
+            child = os.open(component, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return os.dup(fd)
     except FileNotFoundError:
-        if not create:
+        if optional and not create:
             return None
         raise
+    finally:
+        os.close(fd)
+
+
+def available_scopes(root_fd):
+    result = []
+    outbox = scoped_dir(root_fd, "outbox", (), optional=True)
+    if outbox is None:
+        return result
+    try:
+        with os.scandir(outbox) as connections:
+            for entry in connections:
+                if not valid_id(entry.name):
+                    continue
+                try:
+                    connection = os.open(entry.name, DIR_FLAGS, dir_fd=outbox)
+                except OSError:
+                    continue
+                try:
+                    with os.scandir(connection) as workspaces:
+                        for workspace in workspaces:
+                            if valid_id(workspace.name) and workspace.is_dir(follow_symlinks=False):
+                                result.append(scope_fields((entry.name, workspace.name)))
+                finally:
+                    os.close(connection)
+        return sorted(result, key=lambda item: tuple(item[key] for key in SCOPE_FIELDS))
+    finally:
+        os.close(outbox)
+
+
+def verify_scope_directory(root_fd, name, scope, directory):
+    if not scope:
+        return
+    current = scoped_dir(root_fd, name, scope)
+    try:
+        if not os.path.samestat(os.fstat(current), os.fstat(directory)):
+            raise MailboxError("mailbox namespace changed during confirmation")
+    finally:
+        os.close(current)
+
+
+def pickup_dir(root_fd, scope, create=False):
+    return scoped_dir(root_fd, "pickup", scope, create=create, optional=True)
 
 
 def read_pickup(directory, issue):
@@ -345,8 +418,8 @@ def read_pickup(directory, issue):
     return state
 
 
-def update_pickup(root_fd, issue, mutate):
-    directory = pickup_dir(root_fd, create=True)
+def update_pickup(root_fd, scope, issue, mutate):
+    directory = pickup_dir(root_fd, scope, create=True)
     try:
         # Stable local lock serializes short read/modify/write transactions.
         lock = os.open(".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
@@ -399,7 +472,7 @@ def pickup_status(outbox, directory, issue):
             unread_count += 1
     task = latest[1] if latest else None
     sync = newest_sync[1] if newest_sync else None
-    return {"issue_id": issue, "unread_count": unread_count,
+    return {**scope_fields(outbox.scope), "issue_id": issue, "unread_count": unread_count,
             "latest_task": metadata(task) if task else None,
             "latest_sync": metadata(sync) if sync and task and bind(sync) == bind(task) else None,
             **{k: state[k] for k in ("worktree", "draft") if k in state}}
@@ -445,7 +518,10 @@ def pointer(path):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", help="absolute mailbox root; defaults to BRIDGE_ROOT")
+    p.add_argument("--connection", help="locally configured connection ID (requires --workspace)")
+    p.add_argument("--workspace", help="exact Multica workspace ID (requires --connection)")
     commands = p.add_subparsers(dest="command", required=True)
+    commands.add_parser("scopes", help="list available multi-connection outboxes")
     listing = commands.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)
     listing.add_argument("--issue-id")
@@ -480,9 +556,17 @@ def run(args):
     root = args.root or os.environ.get("BRIDGE_ROOT")
     if not root or not os.path.isabs(root):
         raise MailboxError("provide an absolute --root or BRIDGE_ROOT")
+    if (args.connection is None) != (args.workspace is None):
+        raise MailboxError("specify --connection and --workspace together")
+    scope = (require_id(args.connection), require_id(args.workspace)) if args.connection is not None else ()
     root_fd = os.open(root, DIR_FLAGS)
     try:
-        outbox = os.open("outbox", DIR_FLAGS, dir_fd=root_fd)
+        if args.command == "scopes":
+            if scope:
+                raise MailboxError("scopes lists all outboxes; do not specify selectors")
+            emit(available_scopes(root_fd))
+            return
+        outbox = Outbox(scoped_dir(root_fd, "outbox", scope), scope)
         try:
             if args.command == "list":
                 if not 1 <= args.limit <= MAX_LIST:
@@ -492,7 +576,7 @@ def run(args):
                 selected = (x for x in events(outbox)
                             if (issue_id is None or x[1]["issue_id"] == issue_id)
                             and (run_id is None or x[1]["run_id"] == run_id))
-                directory = pickup_dir(root_fd) if args.unread else None
+                directory = pickup_dir(root_fd, scope) if args.unread else None
                 try:
                     ack_map = {}
                     def unread(e):
@@ -528,8 +612,8 @@ def run(args):
                 def acknowledge(state):
                     if event["id"] not in state["acknowledged"]:
                         state["acknowledged"].append(event["id"])
-                update_pickup(root_fd, event["issue_id"], acknowledge)
-                emit({"issue_id": event["issue_id"], "event_id": event["id"], "status": "acknowledged_locally"})
+                update_pickup(root_fd, scope, event["issue_id"], acknowledge)
+                emit({**scope_fields(scope), "issue_id": event["issue_id"], "event_id": event["id"], "status": "acknowledged_locally"})
             elif args.command in {"status", "pickup"}:
                 issue = require_id(args.issue_id)
                 if args.command == "pickup" and (args.worktree is not None or args.draft is not None
@@ -543,8 +627,8 @@ def run(args):
                                 state[k] = pointer(value)
                             elif getattr(args, "clear_" + k):
                                 state.pop(k, None)
-                    update_pickup(root_fd, issue, set_pointers)
-                directory = pickup_dir(root_fd)
+                    update_pickup(root_fd, scope, issue, set_pointers)
+                directory = pickup_dir(root_fd, scope)
                 try:
                     emit(pickup_status(outbox, directory, issue))
                 finally:
@@ -556,7 +640,7 @@ def run(args):
                 original = json_file(args.draft_path)
                 item = rebind_draft(outbox, original, args.rebind) if args.rebind else original
                 request = resolve_request(outbox, item)
-                inbox = os.open("inbox", DIR_FLAGS, dir_fd=root_fd)
+                inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
                 try:
                     shelf = issue_inbox(inbox, request["issue_id"], create=True)
                     try:
@@ -567,6 +651,8 @@ def run(args):
                             raise MailboxError("submission cancelled; no request was written")
                         # Re-check the named event and latest evidence after operator input.
                         # The shelf must still be the same real directory, not a link or replacement.
+                        verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
+                        verify_scope_directory(root_fd, "inbox", scope, inbox)
                         resolve_request(outbox, item)
                         if args.rebind and rebind_draft(outbox, original, args.rebind) != item:
                             raise MailboxError("rebind target changed during confirmation")
@@ -582,11 +668,11 @@ def run(args):
                             os.close(verified)
                     finally:
                         os.close(shelf)
-                    emit({"request_id": request["id"], "status": "submitted_to_local_inbox"})
+                    emit({**scope_fields(scope), "request_id": request["id"], "status": "submitted_to_local_inbox"})
                 finally:
                     os.close(inbox)
         finally:
-            os.close(outbox)
+            os.close(outbox.directory)
     finally:
         os.close(root_fd)
 

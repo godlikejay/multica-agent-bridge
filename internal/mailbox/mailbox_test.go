@@ -149,3 +149,98 @@ func TestRetiredRunsStateCompatibility(t *testing.T) {
 		t.Fatalf("updated load: %+v %v", s, err)
 	}
 }
+
+func TestMailboxConnectionScope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "inbox"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := Box{Root: root, Connection: "cloud", Workspace: "workspace-a"}
+	b := Box{Root: root, Connection: "work", Workspace: "workspace-a"}
+	c := Box{Root: root, Connection: "cloud", Workspace: "workspace-b"}
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for _, box := range []Box{a, b, c} {
+		if err := box.Init(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(box.dir("inbox")); !os.IsNotExist(err) {
+			t.Fatalf("operator did not create the inbox: %v", err)
+		}
+		if inputs, err := box.Inputs("same"); err != nil || len(inputs) != 0 {
+			t.Fatalf("missing scoped inbox: %v, %v", inputs, err)
+		}
+		release, err := box.Lock("same")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+		if err := box.Emit(Message{Version: 1, ID: "same", IssueID: "same"}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(box.dir("outbox"), "same.json"))
+		var e Message
+		if err != nil || json.Unmarshal(raw, &e) != nil || e.Scope != box.scope() {
+			t.Fatalf("event missing local scope: %s (%v)", raw, err)
+		}
+		state, err := box.Load("same")
+		if err != nil || state.Scope != box.scope() {
+			t.Fatalf("cannot load fresh scoped state: %v, %v", state, err)
+		}
+		if err := box.Save(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Even identical Issue, Run, and request IDs cannot replay across scopes.
+	shelf := filepath.Join(a.dir("inbox"), "same")
+	if err := os.MkdirAll(shelf, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for id, scope := range map[string]Scope{"right": a.scope(), "other-connection": b.scope(), "other-workspace": c.scope(), "legacy": {}} {
+		m := Message{Scope: scope, Version: 1, ID: id, Kind: "reply", IssueID: "same", RunID: "same", Epoch: 1, Body: "synthetic"}
+		raw, _ := json.Marshal(m)
+		if err := os.WriteFile(filepath.Join(shelf, id+".json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inputs, err := a.Inputs("same")
+	if err != nil || len(inputs) != 1 || inputs[0].Message.ID != "right" {
+		t.Fatalf("cross-scope input: %v, %v", inputs, err)
+	}
+	raw, err := os.ReadFile(b.statePath("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.statePath("same"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Load("same"); err == nil {
+		t.Fatal("copied state accepted in the wrong scope")
+	}
+}
+
+func TestMailboxScopeCannotBePartialOrSymlinked(t *testing.T) {
+	root := t.TempDir()
+	for _, box := range []Box{{Root: root, Connection: "cloud"}, {Root: root, Connection: "../bad", Workspace: "workspace"}} {
+		if err := box.Init(); err == nil {
+			t.Fatal("invalid scope accepted")
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "inbox"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := Box{Root: root, Connection: "cloud", Workspace: "workspace"}
+	if err := a.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "inbox", "cloud")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Inputs("same"); err == nil {
+		t.Fatal("symlinked inbox connection accepted")
+	}
+}

@@ -6,6 +6,15 @@ private `state/`. Use one root per authorized Multica workspace/Daemon. Do not l
 these directories, especially the inbox. Use a local filesystem with atomic
 rename and advisory file locking; network/sync folders are not supported.
 
+In [multi-connection mode](multi-connection.md), namespace these folders:
+`inbox/<connection_id>/<workspace_id>/<issue_id>/<request_id>.json`,
+`outbox/<connection_id>/<workspace_id>/<event_id>.json`, and
+`state/<connection_id>/<workspace_id>/`. Events and inbox requests in scoped
+folders **must** carry the exact `connection_id` and `workspace_id` as JSON
+fields. A scoped request is rejected if copied to a different namespace and
+the legacy mode does not consume scoped requests. Nothing uses the displayed
+Issue key or the project title for identity or routing.
+
 Events and requests are UTF-8 JSON objects in `<id>.json`. To publish an inbox
 file, write a temporary file in the same directory and then rename it into place.
 IDs use ASCII letters, digits, underscore, dot and hyphen, begin with an

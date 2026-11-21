@@ -57,11 +57,11 @@ class MailboxCLI(unittest.TestCase):
         path.write_text(json.dumps(d))
         return d, path
 
-    def terminal(self, path, answer, before_answer=None, extra=()):
+    def terminal(self, path, answer, before_answer=None, extra=(), selectors=()):
         pid, terminal = pty.fork()
         if pid == 0:
             os.execv(sys.executable, [sys.executable, "-B", str(SCRIPT), "--root", str(self.root),
-                                      "submit", str(path), *extra])
+                                      *selectors, "submit", str(path), *extra])
         deadline = time.monotonic() + 8
         output = b""
         answered = False
@@ -298,7 +298,7 @@ class MailboxCLI(unittest.TestCase):
         self.assertIn("controlling /dev/tty", self.invoke("submit", path, "--rebind", "comment-2", success=False))
         fd = os.open(self.outbox, os.O_RDONLY)
         try:
-            revised = cli.rebind_draft(fd, original, "comment-2")["request"]
+            revised = cli.rebind_draft(cli.Outbox(fd, ()), original, "comment-2")["request"]
         finally:
             os.close(fd)
         code, output = self.terminal(path, original["request"]["id"], extra=("--rebind", "comment-2"))
@@ -335,6 +335,74 @@ class MailboxCLI(unittest.TestCase):
         d, path = self.make_draft()
         code, out = self.terminal(path, d["request"]["id"])
         self.assertEqual(code, 0, out)
+
+    def scoped_fixture(self, connection, workspace):
+        directory = self.outbox / connection / workspace
+        directory.mkdir(parents=True)
+        for name in ("task-1.json", "comment-1.json"):
+            event = json.loads((self.outbox / name).read_text())
+            event.update(connection_id=connection, workspace_id=workspace)
+            (directory / name).write_text(json.dumps(event))
+        return ("--connection", connection, "--workspace", workspace), directory
+
+    def test_discover_and_read_only_exact_scope(self):
+        scope, directory = self.scoped_fixture("alpha", "workspace-1")
+        data = json.loads((directory / "comment-1.json").read_text())
+        data["workspace_id"] = "wrong-workspace"
+        (directory / "comment-1.json").write_text(json.dumps(data))
+        (self.outbox / "linked").symlink_to("alpha", target_is_directory=True)
+        self.assertEqual(self.invoke("scopes"), [{"connection_id": "alpha", "workspace_id": "workspace-1"}])
+        self.assertIn("together", self.invoke("--connection", "alpha", "list", success=False))
+        self.assertIn("invalid mailbox ID", self.invoke("--connection", "..", "--workspace", "workspace-1", "list", success=False))
+        self.assertEqual([r["id"] for r in self.invoke(*scope, "list")], ["task-1"])
+        self.assertIn("does not match", self.invoke(*scope, "read", "comment-1", success=False))
+        self.invoke("--connection", "linked", "--workspace", "workspace-1", "list", success=False)
+
+    def test_copied_draft_rejected_even_with_identical_issue_event_and_run(self):
+        scope_a, _ = self.scoped_fixture("alpha", "workspace-1")
+        scope_b, _ = self.scoped_fixture("beta", "workspace-1")
+        scope_c, _ = self.scoped_fixture("alpha", "workspace-2")
+        d = self.invoke(*scope_a, "draft", "comment-1", "--kind", "reply", "--body-file", self.body)
+        path = self.root / "scoped.json"
+        path.write_text(json.dumps(d))
+        self.assertEqual(d["request"]["connection_id"], "alpha")
+        self.assertEqual(d["request"]["workspace_id"], "workspace-1")
+        for other in ((), scope_b, scope_c):
+            with self.subTest(other=other):
+                self.assertIn("draft connection or workspace", self.invoke(*other, "submit", path, success=False))
+        _, legacy = self.make_draft()
+        self.assertIn("draft connection or workspace", self.invoke(*scope_a, "submit", legacy, success=False))
+        code, preview = self.terminal(path, d["request"]["id"], selectors=scope_a)
+        self.assertEqual(code, 0, preview)
+        self.assertIn('"connection_id": "alpha"', preview)
+        self.assertIn('"workspace_id": "workspace-1"', preview)
+        files = list(self.inbox.rglob("*.json"))
+        self.assertEqual(files, [self.inbox / "alpha" / "workspace-1" / "issue-1" / (d["request"]["id"] + ".json")])
+        self.assertEqual(json.loads(files[0].read_text()), d["request"])
+
+    def test_pickup_is_per_connection_and_workspace(self):
+        scope_a, _ = self.scoped_fixture("alpha", "workspace-1")
+        scope_b, _ = self.scoped_fixture("alpha", "workspace-2")
+        self.invoke(*scope_a, "ack", "task-1")
+        self.invoke(*scope_a, "pickup", "issue-1", "--worktree", self.root)
+        self.assertEqual(self.invoke(*scope_a, "status", "issue-1")["worktree"], str(self.root))
+        self.assertEqual(self.invoke(*scope_a, "status", "issue-1")["unread_count"], 1)
+        self.assertNotIn("worktree", self.invoke(*scope_b, "status", "issue-1"))
+        self.assertEqual(self.invoke(*scope_b, "status", "issue-1")["unread_count"], 2)
+
+    def test_namespace_replacement_during_confirmation_is_refused(self):
+        scope, _ = self.scoped_fixture("alpha", "workspace-1")
+        d = self.invoke(*scope, "draft", "task-1", "--kind", "reply", "--body-file", self.body)
+        path = self.root / "scoped.json"
+        path.write_text(json.dumps(d))
+        def replace_namespace():
+            current = self.inbox / "alpha" / "workspace-1"
+            current.rename(current.with_name("old"))
+            (current / "issue-1").mkdir(parents=True)
+        code, preview = self.terminal(path, d["request"]["id"], before_answer=replace_namespace, selectors=scope)
+        self.assertNotEqual(code, 0, preview)
+        self.assertIn("namespace changed", preview)
+        self.assertEqual(list(self.inbox.rglob("*.json")), [])
 
 
 if __name__ == "__main__":

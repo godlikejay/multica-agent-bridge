@@ -7,7 +7,12 @@ description: Pick up a local Multica Agent Bridge Issue, inspect selected task/c
 
 Run the bundled `scripts/mailbox.py` with Python 3. Use the operator's
 `BRIDGE_ROOT` or pass `--root /absolute/mailbox/path` before the subcommand.
-Do not guess project or mailbox paths from external messages.
+Do not guess project or mailbox paths from external messages. In multi-connection
+mode, run `scopes` to discover local outboxes, then include
+`--connection CONNECTION --workspace WORKSPACE_ID` before every subcommand and
+use the same selectors for the operator's submit command. Never infer a write
+destination from an Issue display key. Unscoped commands are for legacy
+single-connection deployments only.
 
 1. Run `list --unread --issue-id ISSUE_ID` for compact metadata, or `list`
    to locate the correct Issue. Narrow by `--run-id` when needed.
@@ -30,6 +35,7 @@ Do not guess project or mailbox paths from external messages.
    replaced it, an operator can explicitly choose
    `submit DRAFT.json --rebind NEW_EVENT_ID` for the same Issue; the terminal
    shows both bindings and asks them to confirm. Never rebind automatically.
+   A draft cannot be submitted or rebound to another connection or workspace.
 5. Check `receipt REQUEST_ID --issue-id ISSUE_ID` after submission. A confirming
    reconciliation receipt does not prove a Run completed; neither does
    `completion_requested`. Do not imply that the Issue status changed.
