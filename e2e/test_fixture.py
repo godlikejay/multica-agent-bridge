@@ -43,6 +43,10 @@ class FixtureTest(unittest.TestCase):
         with self.assertRaises(ValueError): f.read_event(self.path)
         p = self.root/'outbox/link.json';p.symlink_to(self.path)
         with self.assertRaises(ValueError): f.read_event(p)
+    def test_accept_markdown_escaped_marker_from_ui_editor(self):
+        self.path.write_text(json.dumps(dict(self.event, kind='comment', source_id='comment-1', body=r'E2E\_SYNTHETIC\_ONLY: typed in UI editor')))
+        e = f.read_event(self.path)
+        self.assertEqual(e['source_id'], 'comment-1')
     def test_reject_bad_or_symlink_issue_folder(self):
         with self.assertRaises(ValueError): f.submit(dict(self.event, issue_id='../state'), 'reply', 'fixed')
         (self.root/'inbox/issue-1').symlink_to(self.root/'state', target_is_directory=True)

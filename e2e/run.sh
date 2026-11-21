@@ -16,8 +16,8 @@ case "${1:-help}" in
     need_docker
     compose config --quiet
     compose pull postgres backend frontend
-    compose --profile runtime build runtime
-    compose up -d postgres backend frontend
+    compose --profile runtime build proxy runtime
+    compose up -d postgres backend frontend proxy
     python3 fixture.py health
     echo 'Open http://localhost:13000; human setup required (see e2e/README.md).' ;;
   login)
@@ -58,7 +58,7 @@ case "${1:-help}" in
       event=$1; shift; case "$event" in e2e/*) event=${event#e2e/} ;; esac
       python3 fixture.py "$cmd" "$event" "$@"
     else python3 fixture.py "$cmd" "$@"; fi ;;
-  logs) need_docker; compose --profile runtime logs --tail 100 runtime backend frontend postgres ;;
+  logs) need_docker; compose --profile runtime logs --tail 100 runtime backend frontend proxy postgres ;;
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; test state retained. No volumes/files deleted.' ;;

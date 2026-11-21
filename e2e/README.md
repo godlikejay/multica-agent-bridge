@@ -56,8 +56,10 @@ the steps below; Docker builds the Bridge from the checkout.
 ## Isolation
 
 Dedicated Compose project, database, uploads and `.local/` directories. Only
-localhost ports 13000/18080 are published. The Compose network is `internal`,
-so runtime/backend cannot call model providers or team servers. No Docker
+localhost ports 13000/18080 are published via a minimal read-only loopback TCP
+`proxy` container (`e2e/proxy`). `postgres`, `backend`, `frontend`, and `runtime`
+remain attached solely to the `internal` Compose network, so runtime and backend
+cannot call model providers or team servers. No Docker
 socket, host home, Codex, SSH keys, real repository or team credentials are
 mounted. The runtime's only agent executable is the bridge's Hermes adapter.
 Inbox is host-written, container-read-only; outbox and state are writable.

@@ -15,7 +15,9 @@ RUN addgroup -g 10001 bridge \
  && adduser -D -H -u 10001 -G bridge bridge \
  && mkdir -p /home/runtime /bridge/inbox /bridge/outbox /bridge/state /workspaces \
  && chown -R 10001:10001 /home/runtime /bridge /workspaces
-WORKDIR /workspaces
+# Keep WORKDIR outside MULTICA_WORKSPACES_ROOT (/workspaces) so Multica CLI
+# does not mistake container commands or restarts for a daemon-managed task.
+WORKDIR /home/runtime
 USER 10001:10001
 ENTRYPOINT ["multica"]
 CMD ["--profile", "bridge", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload"]

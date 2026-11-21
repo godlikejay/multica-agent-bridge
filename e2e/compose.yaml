@@ -2,6 +2,7 @@ name: multica-bridge-e2e
 services:
   postgres:
     image: pgvector/pgvector:pg17
+    networks: [internal]
     environment:
       POSTGRES_DB: multica_e2e
       POSTGRES_USER: multica_e2e
@@ -18,7 +19,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    ports: ["127.0.0.1:18080:8080"]
+    networks: [internal]
     environment:
       DATABASE_URL: postgres://multica_e2e:${E2E_DB_PASSWORD:?run init}@postgres:5432/multica_e2e?sslmode=disable
       PORT: "8080"
@@ -38,12 +39,26 @@ services:
   frontend:
     image: ghcr.io/multica-ai/multica-web:v0.11.1
     depends_on: [backend]
-    ports: ["127.0.0.1:13000:3000"]
+    networks: [internal]
     environment:
       HOSTNAME: 0.0.0.0
       REMOTE_API_URL: http://backend:8080
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    depends_on: [backend, frontend]
+    networks: [internal, publish]
+    ports:
+      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:13000:13000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   runtime:
     profiles: [runtime]
+    networks: [internal]
     build:
       context: ..
       dockerfile: Dockerfile
@@ -74,8 +89,10 @@ services:
       - ./.local/bridge/outbox:/bridge/outbox
       - ./.local/bridge/state:/bridge/state
 networks:
-  default:
+  internal:
     internal: true
+  publish:
+    driver: bridge
 volumes:
   database:
   uploads:

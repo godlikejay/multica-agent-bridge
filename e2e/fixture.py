@@ -16,6 +16,7 @@ MAIL = ROOT / 'bridge'
 API = 'http://127.0.0.1:18080'
 WEB = 'http://127.0.0.1:13000'
 MARKER = 'E2E_SYNTHETIC_ONLY'
+ESCAPED_MARKER = MARKER.replace('_', r'\_')
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}')
 RUN_UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 
@@ -82,7 +83,8 @@ def read_event(filename):
     for k in ('id', 'issue_id', 'run_id'):
         if not isinstance(e.get(k), str) or not ID.fullmatch(e[k]):
             raise ValueError('Missing identity: ' + k)
-    if MARKER not in e.get('body', ''):
+    body = e.get('body', '')
+    if MARKER not in body and ESCAPED_MARKER not in body:
         raise ValueError('Only the explicitly marked synthetic fixture is accepted')
     return e
 
