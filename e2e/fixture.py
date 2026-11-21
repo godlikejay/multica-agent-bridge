@@ -28,10 +28,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
-def get(path, token=None):
+def get(path, token=None, workspace_id=None):
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
+    if workspace_id:
+        headers['X-Workspace-ID'] = workspace_id
     with OPENER.open(urllib.request.Request(API + path, headers=headers), timeout=5) as r:
         raw = r.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:

@@ -151,7 +151,7 @@ def read_task(name, file):
 
 def bound_issue(token, event):
     address(event["connection_id"])
-    issue = single.get("/api/issues/" + event["issue_id"], token)
+    issue = single.get("/api/issues/" + event["issue_id"], token, workspace_id=event["workspace_id"])
     if (issue.get("id") != event["issue_id"] or
             issue.get("workspace_id") != event["workspace_id"] or
             issue.get("identifier") != event.get("issue_key") or not event.get("issue_key")):
@@ -197,7 +197,7 @@ def wait_receipt(event, request_id, expected):
 
 def comments(token, event):
     address(event["connection_id"])
-    rows = single.get("/api/issues/" + event["issue_id"] + "/comments?recent=200", token)
+    rows = single.get("/api/issues/" + event["issue_id"] + "/comments?recent=200", token, workspace_id=event["workspace_id"])
     # This is a disposable two-Issue fixture; a long thread isn't a test pass.
     if (not isinstance(rows, list) or len(rows) >= 200 or
             any(row.get("issue_id") != event["issue_id"] for row in rows)):

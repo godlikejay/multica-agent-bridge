@@ -84,7 +84,7 @@ class FixtureTests(unittest.TestCase):
         with patch.object(f.single, "get", return_value=server) as get:
             self.assertEqual(f.bound_issue("synthetic", a), server)
             self.assertEqual(f.single.API, "http://127.0.0.1:18180")
-            get.assert_called_once_with("/api/issues/" + a["issue_id"], "synthetic")
+            get.assert_called_once_with("/api/issues/" + a["issue_id"], "synthetic", workspace_id=a["workspace_id"])
         server["workspace_id"] = u()
         with patch.object(f.single, "get", return_value=server):
             with self.assertRaises(ValueError):
