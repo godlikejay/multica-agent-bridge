@@ -9,6 +9,7 @@ services:
     entrypoint: ["/usr/local/bin/multica-bridge"]
     command: ["serve", "--config", "/etc/multica-bridge/connections.json"]
     init: true
+    stop_grace_period: 45s
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

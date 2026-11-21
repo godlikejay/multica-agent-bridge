@@ -115,6 +115,7 @@ services:
   runtime:
     <<: *minimal
     profiles: [runtime]
+    stop_grace_period: 45s
     build:
       context: ../..
       dockerfile: Dockerfile

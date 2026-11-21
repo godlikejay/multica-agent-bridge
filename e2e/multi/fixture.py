@@ -264,6 +264,30 @@ def test_endpoint_down(name):
     raise ValueError(f"Endpoint {name} unexpectedly reachable during outage")
 
 
+def recovered_task(token, original_a, original_b):
+    outbox = MB / "outbox" / "a" / original_a["workspace_id"]
+    existing = {p.name for p in outbox.glob("*.json")}
+    print("A is back. Now create and assign one NEW marked Todo Issue on A "
+          "(http://localhost:13100), in the same workspace and to the same Agent. "
+          "Keep B unchanged.", flush=True)
+    try:
+        raw = input("After verifying A's new Issue and Run IDs in the UI, enter its task JSON path: ").strip()
+    except EOFError as exc:
+        raise ValueError("No post-restart A task was supplied") from exc
+    prefix = "e2e/multi/"
+    path = Path(raw[len(prefix):] if raw.startswith(prefix) else raw)
+    if not raw or path.name in existing:
+        raise ValueError("Use only a new task event created after the post-restart prompt")
+    a2 = read_task("a", path)
+    if (a2["workspace_id"] != original_a["workspace_id"] or
+            a2["issue_id"] in {original_a["issue_id"], original_b["issue_id"]} or
+            a2["run_id"] in {original_a["run_id"], original_b["run_id"]}):
+        raise ValueError("Use a distinct new Issue and Run from the same synthetic A workspace")
+    bound_issue(token, a2)
+    check_status(token, a2, "running")
+    return a2
+
+
 def accept(path_a, path_b):
     a, b = read_task("a", path_a), read_task("b", path_b)
     token_a, token_b = read_token("a"), read_token("b")
@@ -278,11 +302,17 @@ def accept(path_a, path_b):
         raise ValueError("Expected two running Daemon processes inside the same container")
     check_status(token_a, a, "running")
     check_status(token_b, b, "running")
+    attempts = ROOT / "acceptance-attempts"
+    attempts.mkdir(mode=0o700, exist_ok=True)
+    if not exclusive(attempts / (a["run_id"] + "-" + b["run_id"]), "reserved\n"):
+        raise ValueError("This A/B pair was already attempted; inspect its receipts and use fresh Issues")
     print(f"Start: one container; A PID {pid_a}, B PID {pid_b}; shared key {a['issue_key']}.")
 
     proof = uuid.uuid4().hex
-    body_a, body_b, body_outage, end_a, end_b = [
-        f"{single.MARKER}: {proof} {phase}" for phase in ("a-reply", "b-reply", "b-during-a-outage", "a-complete", "b-complete")
+    body_a, body_b, body_outage, end_a, end_b, body_a2, end_a2 = [
+        f"{single.MARKER}: {proof} {phase}" for phase in (
+            "a-reply", "b-reply", "b-during-a-outage", "a-complete", "b-complete",
+            "a-recovered-reply", "a-recovered-complete")
     ]
     id_a = action(a, "reply", body_a)
     id_b = action(b, "reply", body_b)
@@ -321,17 +351,33 @@ def accept(path_a, path_b):
         raise ValueError("B or the shared runtime container restarted")
     check_status(token_a, a, "completed")
     check_status(token_b, b, "running")
+
+    a2 = recovered_task(token_a, a, b)
+    if running_pid("a") != new_pid or running_pid("b") != pid_b:
+        raise ValueError("Unexpected Daemon restart while waiting on the new Issue")
+    check_status(token_b, b, "running")
+    ra2 = wait_receipt(a2, action(a2, "reply", body_a2), "reply_posted")
+    verify_comment(ra2, body_a2, comments(token_a, a2), comments(token_b, b))
+    ea2 = wait_receipt(a2, action(a2, "complete", end_a2), "completion_requested")
+    wait_completed(token_a, a2)
+    check_status(token_b, b, "running")
+
     eb = wait_receipt(b, action(b, "complete", end_b), "completion_requested")
     wait_completed(token_b, b)
-    ca, cb = comments(token_a, a), comments(token_b, b)
-    for receipt, body, own, other in ((ra, body_a, ca, cb), (ea, end_a, ca, cb),
-                                      (rb, body_b, cb, ca), (outage_r, body_outage, cb, ca),
-                                      (eb, end_b, cb, ca)):
+    if running_pid("a") != new_pid or running_pid("b") != pid_b or compose("ps", "-q", "runtime").split() != one_container:
+        raise ValueError("A, B or the shared runtime container restarted unexpectedly")
+    ca, cb, ca2 = comments(token_a, a), comments(token_b, b), comments(token_a, a2)
+    for receipt, body, own, other in (
+            (ra, body_a, ca, cb + ca2), (ea, end_a, ca, cb + ca2),
+            (rb, body_b, cb, ca + ca2), (outage_r, body_outage, cb, ca + ca2),
+            (eb, end_b, cb, ca + ca2), (ra2, body_a2, ca2, ca + cb),
+            (ea2, end_a2, ca2, ca + cb)):
         verify_comment(receipt, body, own, other)
     print(f"TWO-SERVICE E2E PASS: A {a['issue_id']}/{a['run_id']} completed, "
-          f"A PID {pid_a} -> {new_pid}; B {b['issue_id']}/{b['run_id']} completed, "
-          f"B PID {pid_b} unchanged; exact server reply IDs {ra['remote_id']}, "
-          f"{rb['remote_id']}, {outage_r['remote_id']}.")
+          f"A PID {pid_a} -> {new_pid}; fresh A {a2['issue_id']}/{a2['run_id']} completed; "
+          f"B {b['issue_id']}/{b['run_id']} completed, PID {pid_b} unchanged; "
+          f"exact server reply IDs {ra['remote_id']}, {rb['remote_id']}, "
+          f"{outage_r['remote_id']}, {ra2['remote_id']}.")
 
 
 def main():
@@ -355,6 +401,8 @@ def main():
             for name in PORTS:
                 read_token(name)
         else:
+            if not os.isatty(0):
+                raise ValueError("accept needs an interactive terminal for the post-restart assignment")
             accept(arg.event_a, arg.event_b)
     except (OSError, KeyError, TypeError, subprocess.SubprocessError, ValueError) as exc:
         # HTTP or subprocess exceptions may include their full arguments.

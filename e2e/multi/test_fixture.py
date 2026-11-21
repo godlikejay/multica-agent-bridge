@@ -25,11 +25,11 @@ class FixtureTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    def event(self, name):
-        e = dict(version=1, kind="task", id="fixture", connection_id=name, workspace_id=u(),
+    def event(self, name, workspace=None):
+        e = dict(version=1, kind="task", id=u(), connection_id=name, workspace_id=workspace or u(),
                  issue_id=u(), run_id=u(), epoch=1, body="E2E_SYNTHETIC_ONLY: task", issue_key="TEST-1")
-        p = self.mb / "outbox" / name / e["workspace_id"] / "event.json"
-        p.parent.mkdir(parents=True)
+        p = self.mb / "outbox" / name / e["workspace_id"] / (e["id"] + ".json")
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(e))
         return e, p
 
@@ -111,20 +111,45 @@ class FixtureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 f.verify_comment(receipt, "marker", a, b)
 
+    def test_recovered_task_rejects_event_from_before_prompt(self):
+        a, _ = self.event("a")
+        b, _ = self.event("b")
+        _, stale = self.event("a", a["workspace_id"])
+        with patch("builtins.input", return_value=str(stale)), redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "post-restart prompt"):
+                f.recovered_task("synthetic", a, b)
+
+    def test_recovered_task_rejects_reused_issue(self):
+        a, _ = self.event("a")
+        b, _ = self.event("b")
+
+        def new_event(_):
+            recovered, path = self.event("a", a["workspace_id"])
+            recovered["issue_id"] = a["issue_id"]
+            path.write_text(json.dumps(recovered))
+            return str(path)
+
+        with patch("builtins.input", side_effect=new_event), redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "distinct new Issue"):
+                f.recovered_task("synthetic", a, b)
+
     def test_restart_verification_leaves_other_daemon_running(self):
         a, ap = self.event("a")
         b, bp = self.event("b")
-        states = {"a": "running", "b": "running"}
+        states = {a["run_id"]: "running", b["run_id"]: "running"}
         calls = []
         is_down = False
+        a_pid = 11
+        recovered = None
 
         def compose(*argv):
-            nonlocal is_down
+            nonlocal is_down, a_pid
             calls.append(argv)
             if argv == ("stop", "backend-a"):
                 is_down = True
             if argv == ("up", "-d", "--no-deps", "backend-a"):
                 is_down = False
+                a_pid = 12
             return "one-runtime"
 
         def daemon(name, verb):
@@ -136,13 +161,18 @@ class FixtureTests(unittest.TestCase):
             if "during-a-outage" in body:
                 self.assertTrue(is_down)
                 self.assertEqual(name, "b")
-                self.assertEqual(states["b"], "running")
+                self.assertEqual(states[b["run_id"]], "running")
+            if "a-recovered" in body:
+                self.assertFalse(is_down)
+                self.assertEqual(event, recovered)
+                self.assertEqual(a_pid, 12)
+                self.assertEqual(states[b["run_id"]], "running")
             if kind == "complete":
-                states[name] = "completed"
+                states[event["run_id"]] = "completed"
             return name + kind
 
         def verify_status(_, event, expected):
-            self.assertEqual(states[event["connection_id"]], expected)
+            self.assertEqual(states[event["run_id"]], expected)
 
         def restore_pid(name, previous):
             self.assertFalse(is_down)
@@ -150,7 +180,7 @@ class FixtureTests(unittest.TestCase):
             return 12
 
         def running_pid(name):
-            return 22 if name == "b" else None if is_down else 11
+            return 22 if name == "b" else None if is_down else a_pid
 
         def check_down(name):
             self.assertEqual(name, "a")
@@ -159,17 +189,33 @@ class FixtureTests(unittest.TestCase):
         def receipt(event, request, status):
             return dict(remote_id=request)
 
+        def new_event(_):
+            nonlocal recovered
+            self.assertFalse(is_down)
+            self.assertEqual(a_pid, 12)
+            recovered, path = self.event("a", a["workspace_id"])
+            states[recovered["run_id"]] = "running"
+            return str(path)
+
         with patch.multiple(f, compose=compose, daemon=daemon, action=action, verify_comment=lambda *_: None,
                             check_status=verify_status, read_token=lambda x: x, running_pid=running_pid,
                             wait_pid=restore_pid, test_endpoint_down=check_down, wait_receipt=receipt,
                             bound_issue=lambda _, e: {"identifier": e["issue_key"]},
                             wait_completed=lambda t, e: verify_status(t, e, "completed"), comments=lambda *_: []):
-            with redirect_stdout(io.StringIO()) as out:
+            with patch("builtins.input", side_effect=new_event), redirect_stdout(io.StringIO()) as out:
                 f.accept(ap, bp)
         self.assertIn("TWO-SERVICE E2E PASS", out.getvalue())
         self.assertIn(("a", "stop"), calls)
         self.assertNotIn(("b", "stop"), calls)
-        self.assertEqual(states, {"a": "completed", "b": "completed"})
+        self.assertEqual(states, {e["run_id"]: "completed" for e in (a, b, recovered)})
+        # A partially failed attempt might leave both initial Runs active.
+        # Still refuse to create another set of requests for that pair.
+        states[a["run_id"]] = states[b["run_id"]] = "running"
+        with patch.multiple(f, compose=compose, read_token=lambda x: x, running_pid=running_pid,
+                            bound_issue=lambda _, e: {"identifier": e["issue_key"]},
+                            check_status=verify_status, action=lambda *_: self.fail("unexpected replay")):
+            with self.assertRaisesRegex(ValueError, "already attempted"):
+                f.accept(ap, bp)
 
 
 if __name__ == "__main__":

@@ -62,12 +62,18 @@ scope, use an account that has access only to the intended workspaces. Multiple
 projects on one workspace do not need more Daemons. `max_active_runs` is a
 per-connection cap, also subject to upstream limits.
 
-Keep the runtime and mailbox directories to preserve daemon identity and replay
-protection. The login might be persisted in the runtime directory; treat it as
-credential storage. Don't repoint an existing connection ID to a new service:
-use a new ID and archive the old data instead of copying unprocessed requests.
-Stop the container before changing its configuration or image. Use
-`docker compose -f compose.multi.yaml down` to stop; it doesn't delete host
+Keep the runtime and mailbox directories together to preserve daemon identity
+and replay protection. The runtime directory contains the saved login; treat
+it as credential storage. The mounted PAT file must still be readable at
+startup. To rotate a PAT for the **same account**, update its secret file and
+restart the container. To switch servers **or accounts**, use a new connection
+ID and keep the old mailbox separate; never move unprocessed requests.
+
+Avoid planned stops or upgrades with active Runs. The Bridge supervisor gives
+each Daemon up to 40 seconds to shut down, and Compose gives the container 45
+seconds so it does not cut that short. Shutdown is not a delivery guarantee;
+if the final receipt is uncertain, check the original server before retrying.
+Use `docker compose -f compose.multi.yaml down` to stop; it doesn't delete host
 files.
 
 ## Use the mailbox

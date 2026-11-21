@@ -113,7 +113,7 @@ prove registration. If readiness fails, run `./e2e/multi/run.sh logs`.
    python3 "$tool" --root "$root" --connection b --workspace WORKSPACE_B_UUID list
    ```
 
-3. Invoke the synthetic acceptance runner. This writes deterministic replies and
+3. Invoke the synthetic acceptance runner in an interactive terminal. It writes deterministic replies and
    completion requests to the disposable inbox only:
 
    ```sh
@@ -127,18 +127,29 @@ prove registration. If readiness fails, run `./e2e/multi/run.sh logs`.
    both replies against exact server Issue UUID, source Run UUID and comment
    identity. It completes A without ending B, stops A's synthetic backend
    and A's Daemon, then posts and verifies a reply on B **while A's backend
-   remains down**. It restores A's backend, checks A restarted while B's PID
-   and the container ID stayed unchanged, then completes B. Both Runs must
-   reach `completed` on their respective servers, and each reply must be
-   present only on its intended Issue. Only the final
+   remains down**. It restores A's backend and checks A restarted while B's PID
+   and the container ID stayed unchanged.
+
+4. Wait for the **“A is back”** prompt before creating another Issue. In A's
+   browser, create and assign a fresh marked **Todo** Issue to the same
+   synthetic Agent in the same Workspace. Leave B unchanged. Check the new
+   Issue and Run UUIDs, then paste the new task event path at the prompt
+   (absolute or repository-relative, with no shell quotes). An event already
+   present when the prompt appeared is refused.
+
+   The runner verifies the fresh reply and completion on A while B is still
+   running, then completes B. All three Runs must reach `completed` on their
+   respective servers, each reply must appear on its intended Issue only, and
+   neither B nor the shared container may restart. Only the final
    `TWO-SERVICE E2E PASS` is a pass. An API failure, missing scope, timer
    expiration, local receipt alone, or non-running status is not a pass.
 
    Preserve sanitized output (Git SHA, versions, image digests, Issue/Run
    IDs, receipt statuses, server result). Do not capture Docker env/config,
-   PATs or browser cookies. On any failure, inspect both server Issues and the
+   PATs or browser cookies. On any failure, inspect the server Issues and the
    receipts before retrying. Do not resubmit a request just because delivery
-   is unclear. Use fresh paired Issues with matching display keys for a rerun.
+   is unclear. The original A/B pair is reserved at the start of an attempt,
+   so a rerun requires fresh paired Issues with matching display keys.
 
 ### Optional multi-workspace check
 

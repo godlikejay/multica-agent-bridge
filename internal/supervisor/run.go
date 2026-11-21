@@ -21,7 +21,11 @@ import (
 const daemonBinary = "/usr/local/bin/multica"
 const bridgeBinary = "/usr/local/bin/multica-bridge"
 const loginTimeout = 40 * time.Second
-const stopTimeout = 8 * time.Second
+const loginStopTimeout = 8 * time.Second
+
+// Multica v0.11.1 allows up to 30s for in-flight task cleanup on shutdown;
+// give it headroom before escalating to a process-group kill.
+const daemonStopTimeout = 40 * time.Second
 
 type disk struct{ runtime, mailbox string }
 
@@ -117,7 +121,7 @@ func runConnection(ctx context.Context, d disk, c Connection, testHTTP bool, log
 	}
 	started := time.Now()
 	log(c.ID, "starting Multica daemon", 0)
-	err = runCommand(ctx, env, nil, "--profile", c.ID, "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload")
+	err = runCommand(ctx, env, nil, daemonStopTimeout, "--profile", c.ID, "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload")
 	if err != nil {
 		return time.Since(started), "Multica daemon exited with an error"
 	}
@@ -149,7 +153,7 @@ func ensureLogin(ctx context.Context, runtime, home string, c Connection, env []
 	// Supply the mounted token by stdin only. Upstream output is not forwarded.
 	loginCtx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
-	if err := runCommand(loginCtx, env, strings.NewReader(token+"\n"), "--profile", c.ID, "--server-url", c.ServerURL, "login", "--token"); err != nil {
+	if err := runCommand(loginCtx, env, strings.NewReader(token+"\n"), loginStopTimeout, "--profile", c.ID, "--server-url", c.ServerURL, "login", "--token"); err != nil {
 		return "Multica login failed (check endpoint, token, and workspace membership)"
 	}
 	if err := writePrivateAtomic(marker, fingerprint); err != nil {
@@ -196,8 +200,8 @@ func childEnv(c Connection, home, root string) []string {
 	}
 }
 
-func runCommand(ctx context.Context, env []string, stdin io.Reader, args ...string) error {
-	return runProcess(ctx, daemonBinary, "/home/runtime", env, stdin, stopTimeout, args...)
+func runCommand(ctx context.Context, env []string, stdin io.Reader, grace time.Duration, args ...string) error {
+	return runProcess(ctx, daemonBinary, "/home/runtime", env, stdin, grace, args...)
 }
 
 func runProcess(ctx context.Context, executable, dir string, env []string, stdin io.Reader, grace time.Duration, args ...string) error {
@@ -218,12 +222,21 @@ func runProcess(ctx context.Context, executable, dir string, env []string, stdin
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		// Signal only the leader first. The official daemon owns ACP
+		// cancellation and can report/persist cleanup before we force it.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
 		select {
 		case <-done:
-		case <-time.After(grace):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			<-done
+		case <-timer.C:
+			// Prefer a concurrent clean exit over escalation.
+			select {
+			case <-done:
+			default:
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-done
+			}
 		}
 		return ctx.Err()
 	}

@@ -136,3 +136,82 @@ func TestRunProcessHonorsCancellation(t *testing.T) {
 		t.Fatalf("process failed to stop: %v", err)
 	}
 }
+
+func TestDaemonShutdownLetsActiveWorkerCleanUp(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+
+	// This synthetic daemon explicitly asks its worker to stop after its own
+	// cleanup. The worker detects an accidental process-group SIGTERM.
+	const fakeDaemon = `
+trap '
+    : > stopping
+    while [ ! -f allow-cleanup ]; do sleep 0.01; done
+    : > finish-worker
+    wait "$worker"
+    : > daemon-clean
+    exit 0
+' TERM
+/bin/sh -c '
+    trap ": > worker-interrupted; exit 1" TERM
+    : > worker-ready
+    while [ ! -f finish-worker ]; do sleep 0.01; done
+    : > worker-clean
+' &
+worker=$!
+wait "$worker"
+`
+	const oldScaledGrace = 120 * time.Millisecond
+	grace := time.Duration((daemonStopTimeout / (8 * time.Second))) * oldScaledGrace
+	go func() {
+		done <- runProcess(ctx, "/bin/sh", dir, []string{"PATH=/usr/bin:/bin"}, nil, grace, "-c", fakeDaemon)
+	}()
+	waitMarker := func(name string) {
+		t.Helper()
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				return
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("daemon exited before %s: %v", name, err)
+			case <-timer.C:
+				t.Fatalf("timeout waiting for %s", name)
+			case <-ticker.C:
+			}
+		}
+	}
+	waitMarker("worker-ready")
+	cancel()
+	waitMarker("stopping")
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited before active cleanup completed: %v", err)
+	case <-time.After(oldScaledGrace + 30*time.Millisecond):
+	}
+	if err := os.WriteFile(filepath.Join(dir, "allow-cleanup"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected stop result: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon did not finish")
+	}
+	for _, name := range []string{"worker-clean", "daemon-clean"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("missing graceful cleanup marker %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "worker-interrupted")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worker received premature group SIGTERM (stat=%v)", err)
+	}
+}
