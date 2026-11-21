@@ -39,7 +39,7 @@ func (f *fake) Reply(_ context.Context, issue, parent, body string) (string, err
 	return "remote-" + body, f.postErr
 }
 func (f *fake) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.posts) }
-func run(t *testing.T, box mailbox.Box, r *fake, id string) (chan string, chan error, context.CancelFunc) {
+func run(t *testing.T, box mailbox.Box, r Remote, id string) (chan string, chan error, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -331,5 +331,208 @@ func TestQuarantineFollowsIssueNotOtherRuns(t *testing.T) {
 	}
 	if bad.count() != 1 || good.count() != 1 {
 		t.Fatal("uncertain replay or blocked a separate issue")
+	}
+}
+
+type recoveryRemote struct {
+	fake
+	snapshot []multica.Comment
+	readErr  error
+	reads    int
+}
+
+func (r *recoveryRemote) Task(ctx context.Context) (multica.Task, error) {
+	task, err := r.fake.Task(ctx)
+	task.AgentID = "agent-a"
+	return task, err
+}
+func (r *recoveryRemote) Comments(_ context.Context, _ string) ([]multica.Comment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	return append([]multica.Comment(nil), r.snapshot...), r.readErr
+}
+func (r *recoveryRemote) snapshotAfter(comments []multica.Comment, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.snapshot = comments
+	r.readErr = err
+}
+func (r *recoveryRemote) totalReads() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
+func TestReadRecoveryIsBoundedAndNeverPostsWhileDegraded(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	bad := &recoveryRemote{readErr: &multica.Error{Code: "transport"}}
+	_, errA, stop := run(t, box, bad, "run-a")
+	defer stop()
+	a := task(t, box, "run-a")
+	await(t, box, func(m mailbox.Message) bool {
+		return m.Kind == "sync" && m.Status == "retrying" && m.Revision == "1" && m.RunID == a.RunID
+	})
+	input(t, box, a, "during-retry", "reply", "approved reply")
+	good := &fake{issue: "other"}
+	goodOut, goodErr, _ := run(t, box, good, "run-b")
+	ob := task(t, box, "run-b")
+	input(t, box, ob, "done-b", "complete", "B proceeds")
+	if got := <-goodOut; got != "B proceeds" {
+		t.Fatal(got)
+	}
+	if err := <-goodErr; err != nil {
+		t.Fatal(err)
+	}
+	if bad.count() != 0 {
+		t.Fatal("posted during failed comment synchronization")
+	}
+	bad.snapshotAfter(nil, nil)
+	await(t, box, func(m mailbox.Message) bool {
+		return m.Kind == "sync" && m.Status == "recovered" && m.Revision == "2" && m.RunID == a.RunID
+	})
+	receipt(t, box, "during-retry", "reply_posted")
+	if bad.count() != 1 {
+		t.Fatal("approved queued reply not posted exactly once")
+	}
+	stop()
+	if e := <-errA; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		fault *multica.Error
+		reads int
+	}{
+		{"temporary-exhaustion", &multica.Error{Code: "rate_limited", Status: 429}, maxReadFailures},
+		{"invalid-terminal", &multica.Error{Code: "unauthorized", Status: 401}, 1},
+		{"incomplete-terminal", &multica.Error{Code: "comments_truncated"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &recoveryRemote{readErr: tc.fault}
+			b := mailbox.Box{Root: t.TempDir()}
+			_, errs, cancel := run(t, b, r, "bounded")
+			defer cancel()
+			if got := <-errs; !errors.Is(got, tc.fault) || r.totalReads() != tc.reads {
+				t.Fatalf("failure=%v reads=%d", got, r.totalReads())
+			}
+			await(t, b, func(m mailbox.Message) bool {
+				return m.Kind == "sync" && m.Status == "failed"
+			})
+			if r.count() != 0 {
+				t.Fatal("unexpected write")
+			}
+		})
+	}
+}
+
+func TestLostFinalCommentReconcilesAcrossReplacementWithoutCompleting(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	r1 := &recoveryRemote{fake: fake{postErr: errors.New("committed but response lost")}}
+	_, err1, stop1 := run(t, box, r1, "original")
+	a := task(t, box, "original")
+	input(t, box, a, "maybe-final", "complete", "old final summary")
+	original := receipt(t, box, "maybe-final", "delivery_uncertain")
+	stop1()
+	if e := <-err1; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	ledger, err := box.Load(a.IssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := ledger.Actions["maybe-final"].Intent
+	if intent == nil || intent.AgentID != "agent-a" || !strings.HasPrefix(intent.Marker, "<!-- multica-bridge:") {
+		t.Fatalf("missing durable exact correlation: %+v", intent)
+	}
+	payload := r1.posts[0]
+	if !strings.HasSuffix(payload, "\n\n"+intent.Marker) || mailbox.ID(payload) != intent.PayloadDigest {
+		t.Fatal("intent mismatch")
+	}
+	exact := multica.Comment{
+		ID: "actual-comment", IssueID: a.IssueID, AuthorType: "agent", AuthorID: "agent-a",
+		SourceTaskID: a.RunID, Body: payload, Revision: "1",
+	}
+	r2 := &recoveryRemote{}
+	wrong := exact
+	wrong.SourceTaskID = "replacement"
+	r2.snapshotAfter([]multica.Comment{wrong}, nil)
+	out2, err2, stop2 := run(t, box, r2, "replacement")
+	defer stop2()
+	b := task(t, box, "replacement")
+	input(t, box, b, "blocked", "reply", "new approval while blocked")
+	receipt(t, box, "blocked", "blocked_uncertain")
+
+	duplicate := exact
+	duplicate.ID = "another-exact-comment"
+	r2.snapshotAfter([]multica.Comment{exact, duplicate}, nil)
+	input(t, box, b, "still-blocked", "reply", "ambiguous matches are unsafe")
+	receipt(t, box, "still-blocked", "blocked_uncertain")
+
+	r2.snapshotAfter([]multica.Comment{exact}, nil)
+	confirmed := receipt(t, box, "maybe-final", "delivery_confirmed")
+	if confirmed.ID == original.ID || confirmed.RunID != a.RunID || confirmed.Epoch != a.Epoch || confirmed.RemoteID != exact.ID {
+		t.Fatalf("invalid reconciliation receipt: %+v", confirmed)
+	}
+	again := receipt(t, box, "maybe-final", "delivery_uncertain")
+	if original != again {
+		t.Fatal("original immutable receipt changed")
+	}
+	select {
+	case <-out2:
+		t.Fatal("reconciliation improperly completed replacement run")
+	default:
+	}
+	input(t, box, b, "new-final", "complete", "new approval")
+	receipt(t, box, "new-final", "completion_requested")
+	if got := <-out2; got != "new approval" {
+		t.Fatal(got)
+	}
+	if e := <-err2; e != nil {
+		t.Fatal(e)
+	}
+	if r1.count() != 1 || r2.count() != 1 {
+		t.Fatal("original write repeated or new approval did not submit once")
+	}
+}
+
+type preflightRemote struct {
+	recoveryRemote
+	muPreflight  sync.Mutex
+	safeFailures int
+}
+
+func (r *preflightRemote) Reply(ctx context.Context, issue, parent, body string) (string, error) {
+	r.muPreflight.Lock()
+	if r.safeFailures > 0 {
+		r.safeFailures--
+		r.muPreflight.Unlock()
+		return "", &multica.Error{Code: "transport", BeforePost: true}
+	}
+	r.muPreflight.Unlock()
+	return r.fake.Reply(ctx, issue, parent, body)
+}
+
+func TestTemporaryPresendLookupDoesNotQuarantineOrDuplicate(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	r := &preflightRemote{safeFailures: 2}
+	out, errs, cancel := run(t, box, r, "preflight")
+	defer cancel()
+	a := task(t, box, "preflight")
+	approved := strings.Repeat("x", mailbox.MaxBody)
+	input(t, box, a, "preflight-complete", "complete", approved)
+	if got := <-out; got != approved {
+		t.Fatalf("completion length %d", len(got))
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if r.count() != 1 || len(r.posts[0]) <= mailbox.MaxBody || !strings.HasPrefix(r.posts[0], approved+"\n\n<!-- ") {
+		t.Fatal("32 KiB action or safe preflight retry failed")
+	}
+	s, err := box.Load(a.IssueID)
+	if err != nil || s.Actions["preflight-complete"].Receipt.Status != "completion_requested" || s.LastSyncedAt == "" {
+		t.Fatalf("incorrect persisted result: %v", err)
 	}
 }

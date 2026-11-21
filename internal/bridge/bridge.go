@@ -3,7 +3,10 @@ package bridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -57,6 +60,11 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if s.Sync != nil {
+		if err = b.Box.Emit(*s.Sync); err != nil {
+			return "", err
+		}
+	}
 	if s.RunID != b.RunID {
 		if s.RetiredRuns[b.RunID] {
 			return "", errors.New("run binding was already superseded")
@@ -74,6 +82,8 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		s.Epoch++
 		s.Completion = ""
 		s.TaskEvent = nil
+		s.Sync = nil
+		s.LastSyncedAt = ""
 		if err = b.Box.Save(s); err != nil {
 			return "", err
 		}
@@ -91,7 +101,7 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		}
 	}
 	for _, a := range s.Actions {
-		if err = b.Box.Emit(a.Receipt); err != nil {
+		if err = b.emitReceipts(a); err != nil {
 			return "", err
 		}
 	}
@@ -116,8 +126,24 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 	if err = b.Box.Emit(*s.TaskEvent); err != nil {
 		return "", err
 	}
-	ticker := time.NewTicker(b.Poll)
-	defer ticker.Stop()
+	failures := 0
+	retry := func(readErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		failures++
+		if !transientRead(readErr) || failures >= maxReadFailures {
+			if err := b.setSync(&s, base, "failed"); err != nil {
+				return err
+			}
+			return readErr
+		}
+		if err := b.setSync(&s, base, "retrying"); err != nil {
+			return err
+		}
+		return wait(ctx, retryDelay(b.Poll, failures))
+	}
+poll:
 	for {
 		if err = ctx.Err(); err != nil {
 			return "", err
@@ -125,15 +151,37 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		// Poll before applying local actions so that a failed sync cannot pass as a clean completion.
 		comments, err := b.Remote.Comments(ctx, t.IssueID)
 		if err != nil {
+			if err = retry(err); err != nil {
+				return "", err
+			}
+			continue
+		}
+		recovering := s.Sync != nil && (s.Sync.Status == "retrying" || s.Sync.Status == "failed")
+		if recovering {
+			// Refresh authoritative scope after a degraded read, before acting
+			// on the recovered snapshot (including reconciliation receipts).
+			fresh, scopeErr := b.Remote.Task(ctx)
+			if scopeErr == nil && (fresh.IssueID != t.IssueID || fresh.AgentID != t.AgentID) {
+				scopeErr = errors.New("run issue or agent binding changed during recovery")
+			}
+			if scopeErr != nil {
+				if err = retry(scopeErr); err != nil {
+					return "", err
+				}
+				continue
+			}
+			t = fresh
+		}
+		if err = b.reconcile(&s, comments); err != nil {
 			return "", err
 		}
 		for _, c := range comments {
-			if c.ID == "" || c.SourceTaskID == b.RunID {
+			if c.ID == "" || c.DeletedAt != "" || c.SourceTaskID == b.RunID {
 				continue
 			}
 			own := false
 			for _, a := range s.Actions {
-				if a.Receipt.RemoteID == c.ID {
+				if a.Receipt.RemoteID == c.ID || (a.Reconciliation != nil && a.Reconciliation.RemoteID == c.ID) {
 					own = true
 					break
 				}
@@ -159,6 +207,23 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 				return "", err
 			}
 		}
+		now := time.Now().UTC()
+		lastSync, _ := time.Parse(time.RFC3339Nano, s.LastSyncedAt)
+		if s.Sync == nil || recovering || now.Sub(lastSync) >= 30*time.Second {
+			s.LastSyncedAt = now.Format(time.RFC3339Nano)
+			var syncErr error
+			switch {
+			case recovering:
+				syncErr = b.setSync(&s, base, "recovered")
+			case s.Sync == nil:
+				syncErr = b.setSync(&s, base, "healthy")
+			default:
+				syncErr = b.Box.Save(s)
+			}
+			if syncErr != nil {
+				return "", syncErr
+			}
+		}
 		inputs, err := b.Box.Inputs(t.IssueID)
 		if err != nil {
 			return "", err
@@ -167,7 +232,7 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		if t.TriggerCommentID == "" {
 			actionTask.AllowedParents = append([]string(nil), t.AllowedParents...)
 			for _, c := range comments {
-				if c.ID != "" {
+				if c.ID != "" && c.DeletedAt == "" {
 					actionTask.AllowedParents = append(actionTask.AllowedParents, c.ID)
 				}
 			}
@@ -181,16 +246,22 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 			}
 			done, err := b.apply(ctx, actionTask, &s, in)
 			if err != nil {
+				var remote *multica.Error
+				if errors.As(err, &remote) && remote.BeforePost && transientRead(err) {
+					if err = retry(err); err != nil {
+						return "", err
+					}
+					continue poll
+				}
 				return "", err
 			}
 			if done {
 				return s.Completion, nil
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-ticker.C:
+		failures = 0
+		if err = wait(ctx, b.Poll); err != nil {
+			return "", err
 		}
 	}
 }
@@ -199,15 +270,16 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	m := in.Message
 	if prior, ok := s.Actions[m.ID]; ok {
 		if prior.Digest == in.Digest {
-			return false, b.Box.Emit(prior.Receipt)
+			return false, b.emitReceipts(prior)
 		}
 		conflict := mailbox.Message{Version: 1, Kind: "receipt", ID: mailbox.ID("conflict", s.IssueID, m.ID, in.Digest), RequestID: m.ID, IssueID: s.IssueID, RunID: m.RunID, Epoch: m.Epoch, Status: "id_conflict"}
 		return false, b.Box.Emit(conflict)
 	}
 	receipt := mailbox.Message{Version: 1, Kind: "receipt", ID: mailbox.ID("receipt", s.IssueID, m.ID), RequestID: m.ID, IssueID: s.IssueID, RunID: m.RunID, Epoch: m.Epoch}
+	var intent *mailbox.SendIntent
 	put := func(status string) error {
 		receipt.Status = status
-		s.Actions[m.ID] = mailbox.Action{Digest: in.Digest, Receipt: receipt}
+		s.Actions[m.ID] = mailbox.Action{Digest: in.Digest, Receipt: receipt, Intent: intent}
 		return b.Box.Save(*s)
 	}
 	finish := func(status string) (bool, error) {
@@ -224,7 +296,7 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	}
 	// An unresolved request may already have posted. Never progress silently.
 	for _, a := range s.Actions {
-		if a.Receipt.Status == "delivery_uncertain" {
+		if a.Receipt.Status == "delivery_uncertain" && a.Reconciliation == nil {
 			return finish("blocked_uncertain")
 		}
 	}
@@ -245,13 +317,35 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	if !permitted {
 		return finish("invalid_parent")
 	}
+	// Include an operation-specific inert Markdown comment so a lost response
+	// can be matched later without inferring delivery from ordinary wording.
+	payload := m.Body
+	if t.AgentID != "" {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return false, errors.New("cannot generate delivery correlation marker")
+		}
+		marker := "<!-- multica-bridge:" + hex.EncodeToString(nonce[:]) + " -->"
+		payload += "\n\n" + marker
+		intent = &mailbox.SendIntent{AgentID: t.AgentID, ParentID: parent, Marker: marker, PayloadDigest: mailbox.ID(payload)}
+	}
 	if err := put("sending"); err != nil {
 		return false, err
 	}
-	remoteID, err := b.Remote.Reply(ctx, t.IssueID, parent, m.Body)
+	remoteID, err := b.Remote.Reply(ctx, t.IssueID, parent, payload)
 	if err != nil || remoteID == "" {
 		var re *multica.Error
 		if errors.As(err, &re) && !re.Ambiguous {
+			if re.BeforePost && transientRead(err) {
+				// This process has positive proof it never attempted the POST.
+				// Clear durable sending intent only for that narrow case. A
+				// crash before this save remains conservatively uncertain.
+				delete(s.Actions, m.ID)
+				if saveErr := b.Box.Save(*s); saveErr != nil {
+					return false, saveErr
+				}
+				return false, err
+			}
 			return finish("remote_rejected")
 		}
 		return finish("delivery_uncertain")
@@ -266,4 +360,109 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 		return false, err
 	}
 	return true, b.Box.Emit(receipt)
+}
+
+const maxReadFailures = 6
+
+func transientRead(err error) bool {
+	var remote *multica.Error
+	return errors.As(err, &remote) &&
+		(remote.Code == "transport" || remote.Code == "response_read" ||
+			remote.Status == 408 || remote.Status == 429 || (remote.Status >= 500 && remote.Status <= 599))
+}
+
+func retryDelay(poll time.Duration, failures int) time.Duration {
+	const maxDelay = 30 * time.Second
+	if poll >= maxDelay {
+		return maxDelay
+	}
+	for i := 1; i < failures; i++ {
+		if poll >= maxDelay/2 {
+			return maxDelay
+		}
+		poll *= 2
+	}
+	return poll
+}
+
+func wait(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (b Bridge) setSync(s *mailbox.State, base mailbox.Message, status string) error {
+	if s.Sync != nil && s.Sync.Status == status {
+		return nil
+	}
+	if s.SyncSequence == ^uint64(0) {
+		return errors.New("sync sequence overflow")
+	}
+	s.SyncSequence++
+	base.Kind = "sync"
+	base.Status = status
+	base.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	base.LastSyncedAt = s.LastSyncedAt
+	base.Revision = strconv.FormatUint(s.SyncSequence, 10)
+	base.ID = mailbox.ID("sync", s.IssueID, base.RunID, base.Revision)
+	s.Sync = &base
+	if err := b.Box.Save(*s); err != nil {
+		return err
+	}
+	return b.Box.Emit(base)
+}
+
+func (b Bridge) emitReceipts(a mailbox.Action) error {
+	if err := b.Box.Emit(a.Receipt); err != nil {
+		return err
+	}
+	if a.Reconciliation != nil {
+		return b.Box.Emit(*a.Reconciliation)
+	}
+	return nil
+}
+
+func (b Bridge) reconcile(s *mailbox.State, comments []multica.Comment) error {
+	for id, a := range s.Actions {
+		intent := a.Intent
+		if a.Receipt.Status != "delivery_uncertain" || a.Reconciliation != nil || intent == nil ||
+			intent.AgentID == "" || intent.Marker == "" || intent.PayloadDigest == "" {
+			continue
+		}
+		var matched string
+		for _, c := range comments {
+			if c.ID == "" || c.DeletedAt != "" || c.IssueID != s.IssueID ||
+				c.AuthorType != "agent" || c.AuthorID != intent.AgentID || c.SourceTaskID != a.Receipt.RunID ||
+				c.ParentID != intent.ParentID || !strings.HasSuffix(c.Body, "\n\n"+intent.Marker) ||
+				mailbox.ID(c.Body) != intent.PayloadDigest {
+				continue
+			}
+			if matched != "" {
+				matched = ""
+				break
+			}
+			matched = c.ID
+		}
+		if matched == "" {
+			continue
+		}
+		resolved := a.Receipt
+		resolved.ID = mailbox.ID("reconciliation", s.IssueID, resolved.RunID, resolved.RequestID)
+		resolved.Status = "delivery_confirmed"
+		resolved.RemoteID = matched
+		a.Reconciliation = &resolved
+		s.Actions[id] = a
+		if err := b.Box.Save(*s); err != nil {
+			return err
+		}
+		if err := b.emitReceipts(a); err != nil {
+			return err
+		}
+	}
+	return nil
 }

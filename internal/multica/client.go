@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -35,10 +36,10 @@ func (c Config) String() string   { return "multica.Config{credentials:redacted}
 func (c Config) GoString() string { return c.String() }
 
 type Task struct {
-	IssueID, IssueKey, Title, Description, TriggerCommentID string
-	AllowedParents                                          []string
+	IssueID, IssueKey, Title, Description, TriggerCommentID, AgentID string
+	AllowedParents                                                   []string
 }
-type Comment struct{ ID, Body, Revision, AuthorID, SourceTaskID string }
+type Comment struct{ ID, IssueID, Body, Revision, AuthorID, AuthorType, SourceTaskID, ParentID, DeletedAt string }
 
 // Error deliberately contains neither server bodies, request URLs nor credentials.
 // Ambiguous means a POST may have reached the server. Callers must reconcile the
@@ -47,6 +48,8 @@ type Error struct {
 	Code      string
 	Status    int
 	Ambiguous bool
+	// BeforePost is true only when a read-only check failed before constructing the POST.
+	BeforePost bool
 }
 
 func (e *Error) Error() string {
@@ -229,7 +232,7 @@ func (c *Client) Task(ctx context.Context) (Task, error) {
 			if !validID(t.IssueID) {
 				return Task{}, fail("unsupported_task")
 			}
-			task := Task{IssueID: t.IssueID, TriggerCommentID: t.Trigger}
+			task := Task{IssueID: t.IssueID, TriggerCommentID: t.Trigger, AgentID: t.AgentID}
 			parents := map[string]bool{}
 			for _, p := range append([]string{t.Trigger}, t.Parents...) {
 				if p == "" {
@@ -302,6 +305,9 @@ type wireComment struct {
 	Content      string `json:"content"`
 	Revision     int64  `json:"revision"`
 	AuthorID     string `json:"author_id"`
+	AuthorType   string `json:"author_type"`
+	ParentID     string `json:"parent_id"`
+	DeletedAt    string `json:"deleted_at"`
 	SourceTaskID string `json:"source_task_id"`
 }
 
@@ -337,7 +343,7 @@ func (c *Client) Comments(ctx context.Context, issueID string) ([]Comment, error
 				continue
 			}
 			ids[r.ID] = true
-			result = append(result, Comment{ID: r.ID, Body: r.Content, Revision: strconv.FormatInt(r.Revision, 10), AuthorID: r.AuthorID, SourceTaskID: r.SourceTaskID})
+			result = append(result, Comment{ID: r.ID, IssueID: r.IssueID, Body: r.Content, Revision: strconv.FormatInt(r.Revision, 10), AuthorID: r.AuthorID, AuthorType: r.AuthorType, SourceTaskID: r.SourceTaskID, ParentID: r.ParentID, DeletedAt: r.DeletedAt})
 		}
 		before, id := headers.Get("X-Multica-Next-Before"), headers.Get("X-Multica-Next-Before-Id")
 		if before == "" && id == "" {
@@ -365,7 +371,7 @@ func (c *Client) Reply(ctx context.Context, issueID, parentID, body string) (str
 	}
 	t, err := c.Task(ctx)
 	if err != nil {
-		return "", err
+		return "", beforePost(err)
 	}
 	if issueID != t.IssueID {
 		return "", fail("issue_out_of_scope")
@@ -386,11 +392,11 @@ func (c *Client) Reply(ctx context.Context, issueID, parentID, body string) (str
 		}
 		comments, e := c.Comments(ctx, issueID)
 		if e != nil {
-			return "", e
+			return "", beforePost(e)
 		}
 		ok := false
 		for _, r := range comments {
-			if r.ID == parentID {
+			if r.ID == parentID && r.DeletedAt == "" {
 				ok = true
 			}
 		}
@@ -412,8 +418,20 @@ func (c *Client) Reply(ctx context.Context, issueID, parentID, body string) (str
 	if err != nil {
 		return "", err
 	}
-	if !validID(response.ID) || response.IssueID != issueID || response.SourceTaskID != c.cfg.RunID || response.AuthorID != c.cfg.AgentID {
+	if !validID(response.ID) || response.IssueID != issueID || response.SourceTaskID != c.cfg.RunID ||
+		response.AuthorID != c.cfg.AgentID || response.AuthorType != "agent" || response.ParentID != parentID ||
+		response.Content != body || response.DeletedAt != "" {
 		return "", &Error{Code: "reply_identity_mismatch", Ambiguous: true}
 	}
 	return response.ID, nil
+}
+
+func beforePost(err error) error {
+	var remote *Error
+	if errors.As(err, &remote) {
+		cloned := *remote
+		cloned.BeforePost = true
+		return &cloned
+	}
+	return err
 }

@@ -57,11 +57,11 @@ class MailboxCLI(unittest.TestCase):
         path.write_text(json.dumps(d))
         return d, path
 
-    def terminal(self, path, answer, before_answer=None):
+    def terminal(self, path, answer, before_answer=None, extra=()):
         pid, terminal = pty.fork()
         if pid == 0:
             os.execv(sys.executable, [sys.executable, "-B", str(SCRIPT), "--root", str(self.root),
-                                      "submit", str(path)])
+                                      "submit", str(path), *extra])
         deadline = time.monotonic() + 8
         output = b""
         answered = False
@@ -115,7 +115,7 @@ class MailboxCLI(unittest.TestCase):
         d, path = self.make_draft()
         self.assertEqual(d["event_id"], "comment-1")
         self.assertEqual(d["request"]["run_id"], "run-1")
-        self.assertNotIn("parent_id", d["request"])
+        self.assertEqual(d["request"]["parent_id"], "source-1")
         self.assertIn("controlling /dev/tty", self.invoke("submit", path, success=False))
         self.assertFalse(list(self.shelf.glob("*.json")))
         self.assertFalse((self.root / "state").exists())
@@ -225,6 +225,116 @@ class MailboxCLI(unittest.TestCase):
         self.assertEqual(self.invoke("receipt", "missing"), [])
         self.make_draft()
         self.assertFalse(self.inbox.exists())
+
+
+    def test_pickup_explicit_ack_and_no_implicit_open(self):
+        self.assertEqual(self.invoke("status", "issue-1")["unread_count"], 2)
+        self.invoke("list", "--unread")
+        self.assertTrue(self.invoke("read", "comment-1")["body_truncated"])
+        self.assertFalse((self.root / "pickup").exists())
+        safe_path = str(self.root / "never-opened-worktree")
+        draft_path = str(self.root / "never-opened-draft")
+        picked = self.invoke("pickup", "issue-1", "--worktree", safe_path, "--draft", draft_path)
+        self.assertEqual(picked["worktree"], safe_path)
+        self.assertEqual(picked["draft"], draft_path)
+        self.assertFalse(Path(safe_path).exists())
+        self.assertFalse(Path(draft_path).exists())
+        self.assertEqual(self.invoke("ack", "comment-1")["status"], "acknowledged_locally")
+        self.invoke("ack", "comment-1")
+        self.assertEqual([e["id"] for e in self.invoke("list", "--unread")], ["task-1"])
+        self.event("comment-edit", "comment", source_id="source-1", revision="new")
+        self.assertEqual(self.invoke("status", "issue-1")["unread_count"], 2)
+        self.event("sync-1", "sync", status="retrying", revision="2")
+        self.event("sync-2", "sync", status="recovered", revision="3")
+        self.assertEqual(self.invoke("status", "issue-1")["latest_sync"]["status"], "recovered")
+        self.assertIn("only task/comment", self.invoke("ack", "sync-1", success=False))
+        self.assertIn("absolute", self.invoke("pickup", "issue-1", "--draft", "relative", success=False))
+        self.invoke("pickup", "issue-1", "--clear-worktree", "--clear-draft")
+        rec = self.root / "pickup" / "issue-1.json"
+        self.assertEqual(json.loads(rec.read_text())["acknowledged"], ["comment-1"])
+        self.assertEqual(rec.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_sync_recovery_takes_precedence_over_old_failure(self):
+        d, path = self.make_draft()
+        self.event("sync-10", "sync", status="failed", revision="10")
+        self.assertIn("marks this run failed", self.invoke("submit", path, success=False))
+        self.event("sync-11", "sync", status="recovered", revision="11")
+        os.utime(self.outbox / "sync-10.json", (time.time() + 60, time.time() + 60))
+        code, output = self.terminal(path, d["request"]["id"])
+        self.assertEqual(code, 0, output)
+
+    def test_comment_parent_checked_before_and_after_tty(self):
+        d, path = self.make_draft()
+        for parent in (None, "different"):
+            wrong = dict(d["request"])
+            if parent is None:
+                wrong.pop("parent_id")
+            else:
+                wrong["parent_id"] = parent
+            path.write_text(json.dumps({**d, "request": wrong}))
+            self.assertIn("reply parent", self.invoke("submit", path, success=False))
+        path.write_text(json.dumps(d))
+        code, output = self.terminal(path, d["request"]["id"],
+                                     lambda: self.event("comment-1", "comment", source_id="changed"))
+        self.assertEqual(code, 1, output)
+        self.assertIn("reply parent", output)
+        self.assertFalse(list(self.shelf.glob("*.json")))
+        self.event("comment-1", "comment", source_id="source-1")
+        code, output = self.terminal(path, d["request"]["id"])
+        self.assertEqual(code, 0, output)
+        self.assertIn('"parent_id": "source-1"', output)
+        self.assertEqual(json.loads(next(self.shelf.glob("*.json")).read_text())["parent_id"], "source-1")
+        self.assertNotIn("parent_id", self.make_draft(kind="complete")[0]["request"])
+
+    def test_rebind_only_confirmed_new_scope(self):
+        original, path = self.make_draft()
+        saved = path.read_bytes()
+        self.event("task-2", "task", run_id="run-2", epoch=2)
+        self.event("comment-2", "comment", run_id="run-2", epoch=2, source_id="source-2")
+        self.event("task-other", "task", issue_id="issue-other", run_id="run-other", epoch=2)
+        self.assertIn("stale", self.invoke("submit", path, success=False))
+        self.assertIn("same issue", self.invoke("submit", path, "--rebind", "task-other", success=False))
+        self.assertIn("controlling /dev/tty", self.invoke("submit", path, "--rebind", "comment-2", success=False))
+        fd = os.open(self.outbox, os.O_RDONLY)
+        try:
+            revised = cli.rebind_draft(fd, original, "comment-2")["request"]
+        finally:
+            os.close(fd)
+        code, output = self.terminal(path, original["request"]["id"], extra=("--rebind", "comment-2"))
+        self.assertEqual(code, 1, output)
+        self.assertFalse(list(self.shelf.glob("*.json")))
+        code, output = self.terminal(path, revised["id"], extra=("--rebind", "comment-2"))
+        self.assertEqual(code, 0, output)
+        self.assertIn('"rebind_from"', output)
+        self.assertIn('"parent_id": "source-1"', output)
+        self.assertIn('"parent_id": "source-2"', output)
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(json.loads(next(self.shelf.glob("*.json")).read_text()), revised)
+        self.assertIn("already exists", self.invoke("submit", path, "--rebind", "comment-2", success=False))
+        self.assertIn("already exists", self.invoke("submit", path, "--rebind", "task-2", success=False))
+
+    def test_rebind_rejects_replay_of_pending_or_posted_old_request(self):
+        old, path = self.make_draft()
+        self.shelf.mkdir()
+        prior = old["request"]
+        (self.shelf / (prior["id"] + ".json")).write_text(json.dumps(prior))
+        self.event("task-2", "task", run_id="run-2", epoch=2)
+        args = ("submit", path, "--rebind", "task-2")
+        self.assertIn("pending or unresolved", self.invoke(*args, success=False))
+        self.event("confirmed-old", "receipt", request_id=prior["id"], status="reply_posted")
+        self.assertIn("may already have posted", self.invoke(*args, success=False))
+
+    def test_scoped_receipt_and_reconciliation(self):
+        self.event("r1", "receipt", request_id="same-id", status="delivery_uncertain")
+        self.event("r2", "receipt", issue_id="issue-other", request_id="same-id", status="reply_posted")
+        self.assertIn("multiple issues", self.invoke("receipt", "same-id", success=False))
+        self.event("r3", "receipt", request_id="same-id", status="delivery_confirmed", remote_id="remote-id")
+        receipts = self.invoke("receipt", "same-id", "--issue-id", "issue-1", "--run-id", "run-1")
+        self.assertEqual([r["status"] for r in receipts], ["delivery_confirmed", "delivery_uncertain"])
+        d, path = self.make_draft()
+        code, out = self.terminal(path, d["request"]["id"])
+        self.assertEqual(code, 0, out)
 
 
 if __name__ == "__main__":

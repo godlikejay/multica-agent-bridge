@@ -7,7 +7,7 @@ need_docker() { command -v docker >/dev/null 2>&1 || { echo 'Docker unavailable:
 case "${1:-help}" in
   init)
     umask 077
-    mkdir -p .local/home .local/workspaces .local/bridge/inbox .local/bridge/outbox .local/bridge/state
+    mkdir -p .local/home .local/workspaces/a .local/workspaces/b .local/bridge/inbox .local/bridge/outbox .local/bridge/state
     if [ ! -f .local/compose.env ]; then
       python3 -c 'import secrets,os; print("E2E_DB_PASSWORD="+secrets.token_hex(24)); print("E2E_JWT_SECRET="+secrets.token_hex(32)); print("LOCAL_UID="+str(os.getuid())); print("LOCAL_GID="+str(os.getgid()))' > .local/compose.env
     fi
@@ -33,6 +33,12 @@ case "${1:-help}" in
   status)
     need_docker
     compose --profile runtime exec runtime multica --profile e2e daemon status --output json ;;
+  versions)
+    need_docker
+    compose --profile runtime run --rm runtime version
+    compose --profile runtime run --rm --entrypoint multica-bridge runtime version
+    compose --profile runtime run --rm --entrypoint multica-bridge runtime acp --version ;;
+  restart) need_docker; compose --profile runtime restart runtime ;;
   health) python3 fixture.py health ;;
   smoke)
     event=${2:-${E2E_TASK:-}}
@@ -52,9 +58,9 @@ case "${1:-help}" in
       event=$1; shift; case "$event" in e2e/*) event=${event#e2e/} ;; esac
       python3 fixture.py "$cmd" "$event" "$@"
     else python3 fixture.py "$cmd" "$@"; fi ;;
-  logs) need_docker; compose --profile runtime logs --tail 100 runtime backend ;;
+  logs) need_docker; compose --profile runtime logs --tail 100 runtime backend frontend postgres ;;
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; test state retained. No volumes/files deleted.' ;;
-  *) echo 'Usage: ./e2e/run.sh init|up|login|workspace UUID|runtime|status|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
+  *) echo 'Usage: ./e2e/run.sh init|up|versions|login|workspace UUID|runtime|status|restart|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
 esac

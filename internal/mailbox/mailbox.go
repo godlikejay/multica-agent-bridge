@@ -25,35 +25,48 @@ const maxState = 16 * 1024 * 1024
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 
 type Message struct {
-	Version   int    `json:"version"`
-	Kind      string `json:"kind"`
-	ID        string `json:"id"`
-	IssueID   string `json:"issue_id"`
-	RunID     string `json:"run_id"`
-	Epoch     uint64 `json:"epoch"`
-	Body      string `json:"body,omitempty"`
-	IssueKey  string `json:"issue_key,omitempty"`
-	SourceID  string `json:"source_id,omitempty"`
-	Revision  string `json:"revision,omitempty"`
-	ParentID  string `json:"parent_id,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Status    string `json:"status,omitempty"`
-	RemoteID  string `json:"remote_id,omitempty"`
+	Version      int    `json:"version"`
+	Kind         string `json:"kind"`
+	ID           string `json:"id"`
+	IssueID      string `json:"issue_id"`
+	RunID        string `json:"run_id"`
+	Epoch        uint64 `json:"epoch"`
+	Body         string `json:"body,omitempty"`
+	IssueKey     string `json:"issue_key,omitempty"`
+	SourceID     string `json:"source_id,omitempty"`
+	Revision     string `json:"revision,omitempty"`
+	ParentID     string `json:"parent_id,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
+	Status       string `json:"status,omitempty"`
+	RemoteID     string `json:"remote_id,omitempty"`
+	ObservedAt   string `json:"observed_at,omitempty"`
+	LastSyncedAt string `json:"last_synced_at,omitempty"`
 }
 type State struct {
-	Version     int               `json:"version"`
-	IssueID     string            `json:"issue_id"`
-	RunID       string            `json:"run_id"`
-	Epoch       uint64            `json:"epoch"`
-	TaskEvent   *Message          `json:"task_event,omitempty"`
-	Completion  string            `json:"completion,omitempty"`
-	Seen        map[string]string `json:"seen"`
-	Actions     map[string]Action `json:"actions"`
-	RetiredRuns map[string]bool   `json:"retired_runs,omitempty"`
+	Version      int               `json:"version"`
+	IssueID      string            `json:"issue_id"`
+	RunID        string            `json:"run_id"`
+	Epoch        uint64            `json:"epoch"`
+	TaskEvent    *Message          `json:"task_event,omitempty"`
+	Completion   string            `json:"completion,omitempty"`
+	Seen         map[string]string `json:"seen"`
+	Actions      map[string]Action `json:"actions"`
+	RetiredRuns  map[string]bool   `json:"retired_runs,omitempty"`
+	Sync         *Message          `json:"sync,omitempty"`
+	SyncSequence uint64            `json:"sync_sequence,omitempty"`
+	LastSyncedAt string            `json:"last_synced_at,omitempty"`
 }
 type Action struct {
-	Digest  string  `json:"digest"`
-	Receipt Message `json:"receipt"`
+	Digest         string      `json:"digest"`
+	Receipt        Message     `json:"receipt"`
+	Intent         *SendIntent `json:"intent,omitempty"`
+	Reconciliation *Message    `json:"reconciliation,omitempty"`
+}
+type SendIntent struct {
+	AgentID       string `json:"agent_id"`
+	ParentID      string `json:"parent_id,omitempty"`
+	Marker        string `json:"marker"`
+	PayloadDigest string `json:"payload_digest"`
 }
 type Box struct{ Root string }
 
@@ -228,7 +241,7 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if m.Kind != "reply" && m.Kind != "complete" {
 			continue
 		}
-		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.IssueKey != "" {
+		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" {
 			continue
 		}
 		results = append(results, Input{m, ID(string(raw))})

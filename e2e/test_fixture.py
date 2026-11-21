@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('fixture', Path(__file__).with_name('fixture.py'))
@@ -60,6 +61,19 @@ class FixtureTest(unittest.TestCase):
             self.assertIn('/api/daemon/tasks/', get.call_args.args[0])
         with patch.object(f.getpass, 'getpass', return_value='synthetic'), patch.object(f, 'get', return_value={'status':'failed'}):
             with self.assertRaises(SystemExit): f.verify('00000000-0000-0000-0000-000000000001')
+    def test_health_checks_api_and_frontend_separately(self):
+        with patch.object(f, 'get') as get, patch.object(f, 'web_ready') as web:
+            with contextlib.redirect_stdout(io.StringIO()): f.health()
+        get.assert_called_once_with('/readyz')
+        web.assert_called_once_with()
+    def test_frontend_accepts_only_local_redirects(self):
+        for destination in ('/login', 'http://localhost:13000/login', 'https://example.invalid/', '//example.invalid/'):
+            error = urllib.error.HTTPError(f.WEB, 302, 'redirect', {'Location': destination}, None)
+            with patch.object(f.OPENER, 'open', side_effect=error):
+                if 'example.invalid' in destination:
+                    with self.assertRaises(urllib.error.HTTPError): f.web_ready()
+                else:
+                    f.web_ready()
     def two_tasks(self):
         a = dict(self.event, run_id='00000000-0000-0000-0000-000000000001')
         b = dict(self.event, id='event-2', issue_id='issue-2', run_id='00000000-0000-0000-0000-000000000002')

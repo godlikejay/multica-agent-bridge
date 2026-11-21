@@ -14,6 +14,7 @@ import uuid
 ROOT = Path(__file__).resolve().parent / '.local'
 MAIL = ROOT / 'bridge'
 API = 'http://127.0.0.1:18080'
+WEB = 'http://127.0.0.1:13000'
 MARKER = 'E2E_SYNTHETIC_ONLY'
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}')
 RUN_UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
@@ -34,15 +35,34 @@ def get(path, token=None):
             raise ValueError('Oversized response')
         return json.loads(raw)
 
-def health():
+def wait_ready(name, check):
     for _ in range(60):
         try:
-            get('/readyz')
-            print('Backend /readyz ready (NOT runtime/bridge readiness).')
+            check()
+            print(name + ' ready (NOT runtime/bridge readiness).')
             return
         except (OSError, ValueError):
             time.sleep(2)
-    raise SystemExit('Backend readiness timeout; inspect isolated backend logs.')
+    raise SystemExit(name + ' readiness timeout; inspect isolated Compose logs.')
+
+def web_ready():
+    try:
+        with OPENER.open(WEB + '/', timeout=5) as response:
+            if response.status != 200:
+                raise ValueError('Expected an HTML page or a local redirect')
+    except urllib.error.HTTPError as exc:
+        # A redirect to the frontend sign-in page is normal before bootstrap.
+        destination = exc.headers.get('Location', '')
+        exc.close()
+        local = (destination.startswith('/') and not destination.startswith('//')
+                 or destination.startswith(WEB + '/')
+                 or destination.startswith('http://localhost:13000/'))
+        if not (300 <= exc.code < 400 and local):
+            raise
+
+def health():
+    wait_ready('Backend /readyz', lambda: get('/readyz'))
+    wait_ready('Frontend', web_ready)
 
 def read_event(filename):
     original = Path(filename)

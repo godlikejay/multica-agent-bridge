@@ -28,6 +28,12 @@ ACP prompt. An event is an observation, not permission to act.
 - `receipt`: `request_id`, `status`, and `remote_id` when a posted comment
   was verified. Receipt status describes what the Bridge knows, not the entire
   remote Run state.
+- `sync`: a per-Issue binding-scoped observation of remote comment sync;
+  `revision` is the Bridge's increasing transition sequence, not chronology of
+  comments. `healthy` is the first complete read; `retrying` means sends are
+  paused; `recovered` follows a complete read after interruption; `failed` means
+  recovery stopped. `observed_at` and `last_synced_at` are UTC timestamps at the
+  transition, not a live heartbeat. The Outbox doesn't grow on every poll.
 
 ## Inbox
 
@@ -51,14 +57,21 @@ Receipt statuses:
 - `stale`, `id_conflict`, `invalid_parent`, `invalid_body`, `remote_rejected`: request rejected.
 - `delivery_uncertain`: a write cannot be confirmed. Do not resend blindly.
   Inspect the actual Issue and Run; further sends for this Run are blocked
-  (`blocked_uncertain`). This prototype has no automated reconciliation or
-  resolution command.
+  (`blocked_uncertain`) until there is positive evidence of delivery.
+- `delivery_confirmed`: a separate receipt for the original request after
+  recovery finds its exact comment. It doesn't replace the earlier receipt or
+  confirm that the original Run finished. It never finishes a newer Run.
 
 There is no global exactly-once guarantee for remote comments. The local writer
-records intent before posting and saves the result; if it crashes between those
-steps the recovered state is uncertain. A replacement Run never auto-posts old
-inbox actions. An unresolved write also blocks fresh sends on replacement Runs
-for the same Issue, without affecting other Issues.
+records intent and a unique Markdown correlation marker before posting, then
+saves the result. Recovery requires one nondeleted match with the same Issue,
+original Run, agent, parent and exact transmitted body/marker. A missing or
+ambiguous match (including old requests without markers) remains quarantined.
+The marker is delivery metadata, not authentication. The Bridge retries only
+transient comment reads with a bounded cancellable delay, never comment posts.
+A replacement Run never auto-posts old inbox actions. An unresolved write also
+blocks fresh sends on replacement Runs for the same Issue, without affecting
+other Issues.
 
 ## Concurrency and upgrade
 

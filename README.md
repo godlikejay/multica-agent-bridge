@@ -14,8 +14,8 @@ the operating permissions have been reviewed.
 - Go 1.24+ on Linux or macOS: `make check` runs synthetic tests, and
   `make build` builds `bin/multica-bridge`.
 - Docker Compose v2: see [the integration runbook](e2e/README.md) for the
-  pinned Multica stack, one-time synthetic workspace setup, and test command.
-  No model account or Codex installation is needed.
+  fresh-machine setup, local image build, and one- and two-Issue acceptance
+  tests against pinned Multica. No model account or coding agent is needed.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for where to make changes and what counts as
 evidence, and [the protocol](docs/protocol.md) for file formats and receipts.
@@ -37,5 +37,10 @@ for that Issue increments its epoch; old requests are not carried over.
 
 The mailbox and private Bridge state are JSON files. The operator writes the Issue-specific Inbox; the runtime reads it. This is not an independent approval gate for
 an agent sharing the same user account or filesystem privileges.
+
+Keep each Issue's local pickup state (reviewed messages, checkout and unsent
+draft reference) separate from its live Run and from other Issues. The pickup
+tool does not start agents, change Multica, or turn a draft into an approved
+reply. See [the operator workflow](docs/agent-integration.md).
 
 Licensed under [Apache-2.0](LICENSE).

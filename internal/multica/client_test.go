@@ -135,10 +135,10 @@ func TestCommentsPagination(t *testing.T) {
 		} else if r.URL.Query().Get("before_id") != "c1" {
 			t.Fatal("cursor")
 		}
-		return response(200, fmt.Sprintf(`[{"id":"c%d","issue_id":"issue","content":"body","revision":3,"author_id":"user"}]`, n), h), nil
+		return response(200, fmt.Sprintf(`[{"id":"c%d","issue_id":"issue","content":"body","revision":3,"author_id":"agent","author_type":"agent","source_task_id":"original","parent_id":"direct"}]`, n), h), nil
 	})
 	rows, e := c.Comments(context.Background(), "issue")
-	if e != nil || len(rows) != 2 || rows[0].Revision != "3" {
+	if e != nil || len(rows) != 2 || rows[0].Revision != "3" || rows[0].ParentID != "direct" || rows[0].SourceTaskID != "original" || rows[0].AuthorType != "agent" {
 		t.Fatalf("%+v %v", rows, e)
 	}
 	_, e = c.Comments(context.Background(), "foreign")
@@ -158,7 +158,7 @@ func TestReply(t *testing.T) {
 		if p["content"] != "approved" || p["parent_id"] != "other" || p["type"] != "comment" {
 			t.Fatal(p)
 		}
-		return response(201, `{"id":"new","issue_id":"issue","source_task_id":"run","author_id":"agent"}`, nil), nil
+		return response(201, `{"id":"new","issue_id":"issue","source_task_id":"run","author_id":"agent","author_type":"agent","content":"approved","parent_id":"other"}`, nil), nil
 	})
 	id, e := c.Reply(context.Background(), "issue", "other", "approved")
 	if e != nil || id != "new" {
@@ -231,7 +231,7 @@ func TestAssignmentReplyAndRuntime(t *testing.T) {
 			if p["parent_id"] != nil {
 				t.Fatal(p)
 			}
-			return response(201, `{"id":"new","issue_id":"issue","source_task_id":"run","author_id":"agent"}`, nil), nil
+			return response(201, `{"id":"new","issue_id":"issue","source_task_id":"run","author_id":"agent","author_type":"agent","content":"approved","parent_id":null}`, nil), nil
 		}
 		if strings.HasSuffix(r.URL.Path, "/tasks") {
 			return response(200, strings.Replace(taskJSON, `"trigger_comment_id":"trigger"`, `"trigger_comment_id":null`, 1), nil), nil
@@ -292,5 +292,23 @@ func TestReplyResponseBinding(t *testing.T) {
 	code(t, e, "reply_identity_mismatch")
 	if !e.(*Error).Ambiguous {
 		t.Fatal("unknown remote write reported safe")
+	}
+}
+
+func TestReplyPreflightReadFailureIsDistinguishedFromWriteLoss(t *testing.T) {
+	posts := 0
+	c := client(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost {
+			posts++
+			t.Fatal("POST issued after unsuccessful Task check")
+		}
+		if strings.HasSuffix(r.URL.Path, "/tasks") {
+			return response(503, "unavailable", nil), nil
+		}
+		return standard(r), nil
+	})
+	_, e := c.Reply(context.Background(), "issue", "trigger", "approved")
+	if got, ok := e.(*Error); !ok || !got.BeforePost || got.Ambiguous || got.Status != 503 || posts != 0 {
+		t.Fatalf("preflight result %+v, posts=%d", e, posts)
 	}
 }

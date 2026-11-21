@@ -35,11 +35,16 @@ From the Bridge checkout, for example:
 export BRIDGE_ROOT="$PWD/.bridge"
 tool=skills/multica-bridge/scripts/mailbox.py
 python3 "$tool" list --issue-id ISSUE_ID  # Omit the filter to find task IDs.
+python3 "$tool" pickup ISSUE_ID --worktree /absolute/path/to/checkout
+python3 "$tool" status ISSUE_ID
+python3 "$tool" list --issue-id ISSUE_ID --unread
 python3 "$tool" read EVENT_ID
+python3 "$tool" ack EVENT_ID  # Explicitly mark a reviewed task/comment.
 python3 "$tool" draft EVENT_ID --kind reply --body-file reply.txt > reply.draft.json
+python3 "$tool" pickup ISSUE_ID --draft "$PWD/reply.draft.json"
 # Run this yourself, in a terminal, after reviewing destination and exact text.
 python3 "$tool" submit reply.draft.json
-python3 "$tool" receipt REQUEST_ID
+python3 "$tool" receipt REQUEST_ID --issue-id ISSUE_ID
 ```
 
 `list` shows metadata, not the full message backlog. Pick the actual event and
@@ -48,6 +53,13 @@ all Issues assigned in Multica. Queued Runs appear locally only once picked up.
 Use `--issue-id` or `--run-id` to narrow the list; a task event is not proof
 that the Run is still active on the server.
 
+`pickup` records local notes for one Issue: a checkout path and/or an unsent
+draft path. It does not open those paths or start work. `status` summarizes the
+Issue's local progress and last observed sync, not live Multica state. `read` and
+`list` don't mark anything reviewed; acknowledge only after examining the
+content you need. An edited comment is a new event even if the previous edit
+was acknowledged. Keep pickup state and draft files out of the project repo.
+
 A draft is not an Inbox request. The operator's `submit` validates scope against
 the available local events, shows exactly what will be sent, and asks for
 confirmation before atomically creating the file under `inbox/<issue_id>/`. The Bridge independently
@@ -55,6 +67,14 @@ checks the active binding. This is not a security boundary against other
 processes with identical filesystem and terminal privileges. To enforce a
 human-only write boundary, restrict the agent to outbox and a scratch/draft
 directory, and keep the inbox and approval process under a different identity.
+
+If Multica starts a replacement Run, read the new task/comment first. To reuse
+the old text, the operator can run `submit reply.draft.json --rebind NEW_EVENT_ID`.
+This previews a new request tied to the newer Run for the **same Issue**, and
+requires fresh approval. It leaves the old draft file untouched. For a reply
+draft based on a comment, confirm the exact parent; the Bridge will reject
+it if the Run cannot reply to that thread. A delivery still marked uncertain
+must not be resent just because no receipt or comment is visible.
 
 Each explicit `complete` is scoped to one Run. It doesn't close the corresponding
 Issue or change other tasks. Check the actual remote Run in Multica; if delivery
