@@ -16,8 +16,9 @@ Multica account. The stack, test volumes, and local credentials are removed
 on exit. It refuses to run over an existing `e2e/.local` directory. Keep the
 fixed development verification code on this loopback-only fixture.
 
-GitHub Actions runs this one smoke separately from the offline tests and the
-image publisher. It tests the pinned self-hosted protocol, not Multica Cloud.
+GitHub Actions runs this smoke separately from the offline checks, the
+Compose supervisor smoke, and the image publisher. Changes limited to this
+README do not trigger CI. It tests the pinned self-hosted protocol, not Multica Cloud.
 
 ## Bootstrap manually for debugging
 
