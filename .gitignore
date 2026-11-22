@@ -6,3 +6,6 @@
 /.env
 
 /.bridge-multi/
+mailbox.local.json
+.mailbox-config-*
+__pycache__/

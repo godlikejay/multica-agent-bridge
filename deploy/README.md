@@ -63,8 +63,10 @@ See the [mailbox guide](../docs/agent-integration.md) for handling the event.
 
 ## Reply to the first Issue
 
-Run from the install directory. Use Python 3 and copy the workspace ID from
-`scopes` and the event ID from `list`. The event ID is not the Issue number.
+Run from the install directory. This first-reply example uses a one-off test
+command with Python 3; for day-to-day work, [save your project routes](../docs/agent-integration.md#configure-once-per-project).
+If you do not know the workspace UUID yet, use `scopes` to discover it after
+the first task arrives. The event ID from `list` is not the Issue number.
 ```sh
 base=https://raw.githubusercontent.com/godlikejay/multica-agent-bridge/main
 curl -fsSLo mailbox.py "$base/skills/multica-bridge/scripts/mailbox.py"
@@ -120,7 +122,8 @@ docker compose exec -T -e HOME=/bridge-runtime/cloud/home bridge \
 
 Create custom paths before starting Compose. Protect `secrets/` and
 `data/runtime/`; give a coding agent only the mailbox access it needs.
-An agent prepares a draft; the operator reviews and submits it on the host.
+An agent needs Inbox write access to submit an ordinary reply you explicitly
+authorize. For setup and approval rules, see the [coding agent guide](../docs/agent-integration.md).
 Use separate containers, mounts and credentials for mutually untrusted environments.
 
 When no Runs are active, `docker compose pull && docker compose up -d` upgrades

@@ -44,7 +44,7 @@ Compose 会按机器架构拉镜像，容器会拿挂载的令牌登录并启动
 
 ## 3. 回第一条消息
 
-在安装目录用 Python 3 运行。工作区 ID 看 `scopes`，任务事件 ID 看 `list`，不是 Issue 编号。
+在安装目录用 Python 3 做这次测试。日常使用可[按项目保存配对](../docs/zh-CN/agent-integration.md#按项目配置一次)。若还不知道工作区 UUID，第一单到达后用 `scopes` 查看。`list` 显示的任务事件 ID 不是 Issue 编号。
 ```sh
 base=https://raw.githubusercontent.com/godlikejay/multica-agent-bridge/main
 curl -fsSLo mailbox.py "$base/skills/multica-bridge/scripts/mailbox.py"
@@ -84,6 +84,6 @@ docker compose exec -T -e HOME=/bridge-runtime/cloud/home bridge \
 
 ## 挂载与升级
 
-默认配置是 `connections.json`，令牌在 `secrets/`，邮箱和运行状态在 `data/`。可以在 `.env` 用 `BRIDGE_CONFIG`、`BRIDGE_SECRETS_DIR`、`BRIDGE_DATA_DIR` 改位置；先在宿主机建好目录。不要给 Agent 访问令牌或 daemon 登录目录的权限。
+默认配置是 `connections.json`，令牌在 `secrets/`，邮箱和运行状态在 `data/`。可以在 `.env` 用 `BRIDGE_CONFIG`、`BRIDGE_SECRETS_DIR`、`BRIDGE_DATA_DIR` 改位置；先在宿主机建好目录。如果要让 Agent 提交你明确授权的普通回复，只给它必要的邮箱读写权限，不要给它令牌或 daemon 登录目录的权限。[Agent 接入指南](../docs/zh-CN/agent-integration.md)说明如何一次配置路径和确认回复。
 
 确认没有正在跑的任务后，`docker compose pull && docker compose up -d` 更新镜像。想锁定版本可在 `.env` 用 `BRIDGE_IMAGE` 指定镜像 digest。保留 `data/runtime` 和 `data/state`。同一账号更换令牌时，更新文件，等正在跑的 Run 结束后执行 `docker compose restart bridge`。换账号或服务则用新的连接 ID，不搬运未处理的请求。互不信任的环境用各自的容器、目录和令牌。

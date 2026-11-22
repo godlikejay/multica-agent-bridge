@@ -28,19 +28,24 @@ Python 3 (standard library only).
 Both options use the same Compose configuration for one or more connections.
 
 After the mailbox works, install the [coding agent skill](docs/agent-integration.md)
-for Codex, Antigravity CLI, or Oh My Pi. The skill drafts replies; you decide
-what to submit. See the [English documentation index](docs/README.md) for more.
+for Codex, Antigravity CLI, or Oh My Pi. Save the mailbox path and one or more
+connection/workspace pairs per project. Use workspace URL slugs on the Bridge
+host or UUIDs for offline setup. The agent can list tasks across those
+workspaces and submit ordinary replies you explicitly authorize. Completion
+or moving a draft to another Run requires terminal confirmation.
 
 ## Scope
 
 The standard Multica daemon owns the remote Run. An issue and observed comment
-versions appear in the outbox; only explicit local input can post a reply or
-request normal completion. Finishing a Run does not change its Issue status.
-Multiple Issues can be active. Runs for one Issue are serialized. A new Run
-for that Issue increments its epoch; old requests are not carried over.
+versions appear in the outbox. Replies and requests to finish a Run need
+local authorization; remote issue text cannot authorize either. Finishing a
+Run does not change its Issue status. Multiple Issues can be active. Runs for
+one Issue are serialized. A new Run for that Issue increments its epoch; old
+requests are not carried over.
 
-The mailbox and private Bridge state are JSON files. The operator writes the Issue-specific Inbox; the runtime reads it. This is not an independent approval gate for
-an agent sharing the same user account or filesystem privileges.
+The mailbox and private Bridge state are JSON files. The runtime reads the
+Issue-specific Inbox. An agent that submits authorized replies needs Inbox
+write access; the Skill does not enforce OS permissions.
 
 Keep each Issue's local pickup state (reviewed messages, checkout and unsent
 draft reference) separate from its live Run and from other Issues. The pickup

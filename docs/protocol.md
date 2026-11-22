@@ -1,8 +1,8 @@
 # File mailbox protocol v1
 
 `BRIDGE_ROOT` is an absolute local path, normally the install directory’s
-`data/`. The operator writes the inbox; the Bridge writes the outbox and
-private state. Use a local filesystem with atomic rename and advisory file
+`data/`. The mailbox tool writes authorized requests to the inbox; the
+Bridge writes the outbox and private state. Use a local filesystem with atomic rename and advisory file
 locking; network/sync folders are not supported. Do not let an untrusted
 process write to the mailbox, especially the inbox.
 

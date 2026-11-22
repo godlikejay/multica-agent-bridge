@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local Multica mailbox utility; no network, agent execution, or Bridge state access."""
+"""Local Multica mailbox utility; setup can resolve slugs via an existing Bridge."""
 
 import argparse
 import fcntl
@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
+import tempfile
 import unicodedata
 import uuid
 from typing import NamedTuple
@@ -28,6 +30,7 @@ KINDS = {"reply", "complete"}
 TERMINAL = {"completion_requested"}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+LOCAL_CONFIG = Path(__file__).resolve().parent.parent / "mailbox.local.json"
 
 
 class MailboxError(Exception):
@@ -515,12 +518,160 @@ def pointer(path):
     return path
 
 
+def selected_scope(connection, workspace):
+    if (connection is None) != (workspace is None):
+        raise MailboxError("specify --connection and --workspace together")
+    return (require_id(connection), require_id(workspace)) if connection is not None else ()
+
+
+def check_root(root):
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise MailboxError("configure an absolute mailbox root with setup, --root or BRIDGE_ROOT")
+    return root
+
+
+def route_pair(value):
+    pieces = value.split(":")
+    if len(pieces) != 2:
+        raise MailboxError("use --route CONNECTION:WORKSPACE")
+    return selected_scope(*pieces)
+
+
+def workspace_uuid(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        canonical = str(uuid.UUID(value))
+    except ValueError:
+        return None
+    return canonical if value.lower() == canonical else None
+
+
+def workspace_entries(install, connection):
+    compose = install / "compose.yaml"
+    if not compose.is_file():
+        raise MailboxError("slug lookup requires the Bridge Compose directory; set --install-dir")
+    command = ["docker", "compose", "--project-directory", str(install), "-f", str(compose),
+               "exec", "-T", "-e", f"HOME=/bridge-runtime/{connection}/home", "bridge",
+               "multica", "--profile", connection, "workspace", "list", "--output", "json"]
+    try:
+        result = subprocess.run(command, cwd=install, stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=20, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MailboxError(f"cannot look up workspaces for {connection}; check the running Bridge and Docker access") from exc
+    try:
+        entries = json.loads(result.stdout, object_pairs_hook=unique_object)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise MailboxError("invalid Multica workspace list") from exc
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise MailboxError("invalid Multica workspace list")
+    return entries
+
+
+def resolve_setup_routes(root, install_dir, values):
+    install = Path(check_root(install_dir)) if install_dir is not None else Path(root).parent
+    by_connection = {}
+    pairs = []
+    for connection, workspace in map(route_pair, values):
+        identifier = workspace_uuid(workspace)
+        if identifier is None:
+            if connection not in by_connection:
+                by_connection[connection] = workspace_entries(install, connection)
+            matches = [entry for entry in by_connection[connection] if entry.get("slug") == workspace]
+            if len(matches) != 1 or not (identifier := workspace_uuid(matches[0].get("id"))):
+                raise MailboxError(f"no unique workspace with slug {workspace} on {connection}")
+        pairs.append((connection, identifier))
+    return pairs
+
+
+def load_local_config():
+    try:
+        config = json_file(LOCAL_CONFIG)
+    except FileNotFoundError:
+        return None, ()
+    routes = config.get("routes")
+    if set(config) != {"root", "routes"} or not isinstance(routes, list):
+        raise MailboxError("invalid mailbox.local.json; run setup again")
+    pairs = []
+    for entry in routes:
+        if not isinstance(entry, dict) or set(entry) != set(SCOPE_FIELDS):
+            raise MailboxError("invalid project route; run setup again")
+        pairs.append(tuple(require_id(entry[key]) for key in SCOPE_FIELDS))
+    return check_root(config["root"]), tuple(dict.fromkeys(pairs))
+
+
+def save_local_config(root, install_dir, values):
+    root = check_root(root)
+    fd = os.open(root, DIR_FLAGS)
+    try:
+        discovered = scoped_dir(fd, "outbox", ())
+        os.close(discovered)
+    finally:
+        os.close(fd)
+    routes = resolve_setup_routes(root, install_dir, values)
+    config = {"root": root, "routes": [scope_fields(pair) for pair in dict.fromkeys(routes)]}
+    fd, staged = tempfile.mkstemp(prefix=".mailbox-config-", dir=LOCAL_CONFIG.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(staged, LOCAL_CONFIG)
+    finally:
+        Path(staged).unlink(missing_ok=True)
+    emit({"status": "configured", "config_path": str(LOCAL_CONFIG), **config})
+
+
+def list_events(root_fd, routes, args):
+    if not 1 <= args.limit <= MAX_LIST:
+        raise MailboxError(f"limit must be 1–{MAX_LIST}")
+    issue_id = require_id(args.issue_id) if args.issue_id is not None else None
+    run_id = require_id(args.run_id) if args.run_id is not None else None
+
+    def selected():
+        for scope in routes:
+            # A configured workspace may not have received its first task yet.
+            outbox_fd = scoped_dir(root_fd, "outbox", scope, optional=True)
+            if outbox_fd is None:
+                continue
+            directory = None
+            try:
+                directory = pickup_dir(root_fd, scope) if args.unread else None
+                ack_map = {}
+                for when, e in events(Outbox(outbox_fd, scope)):
+                    issue = e["issue_id"]
+                    if issue_id is not None and issue != issue_id:
+                        continue
+                    if run_id is not None and e["run_id"] != run_id:
+                        continue
+                    if args.unread:
+                        if e["kind"] not in UNREAD_KINDS:
+                            continue
+                        if issue not in ack_map:
+                            ack_map[issue] = set(read_pickup(directory, issue)["acknowledged"])
+                        if e["id"] in ack_map[issue]:
+                            continue
+                    yield when, scope, e
+            finally:
+                if directory is not None:
+                    os.close(directory)
+                os.close(outbox_fd)
+
+    newest = heapq.nlargest(args.limit, selected(), key=lambda x: (x[0], x[1], x[2]["id"]))
+    emit([metadata(e) for _, _, e in newest])
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--root", help="absolute mailbox root; defaults to BRIDGE_ROOT")
+    p.add_argument("--root", help="absolute mailbox root; overrides project setup (BRIDGE_ROOT is a fallback)")
     p.add_argument("--connection", help="locally configured connection ID (requires --workspace)")
     p.add_argument("--workspace", help="exact Multica workspace ID (requires --connection)")
     commands = p.add_subparsers(dest="command", required=True)
+    setup = commands.add_parser("setup", help="save local mailbox settings next to the installed SKILL.md")
+    setup.add_argument("mailbox_root")
+    setup.add_argument("--route", action="append", default=[], metavar="CONNECTION:SLUG_OR_UUID")
+    setup.add_argument("--install-dir", help="absolute Bridge Compose install directory; defaults to the parent of the mailbox root")
     commands.add_parser("scopes", help="list available multi-connection outboxes")
     listing = commands.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)
@@ -549,16 +700,28 @@ def parser():
     submit = commands.add_parser("submit")
     submit.add_argument("draft_path", type=Path)
     submit.add_argument("--rebind", metavar="NEW_EVENT_ID")
+    submit.add_argument("--yes", action="store_true", help="submit an already authorized scoped reply without a terminal prompt")
     return p
 
 
 def run(args):
-    root = args.root or os.environ.get("BRIDGE_ROOT")
-    if not root or not os.path.isabs(root):
-        raise MailboxError("provide an absolute --root or BRIDGE_ROOT")
-    if (args.connection is None) != (args.workspace is None):
-        raise MailboxError("specify --connection and --workspace together")
-    scope = (require_id(args.connection), require_id(args.workspace)) if args.connection is not None else ()
+    explicit_scope = selected_scope(args.connection, args.workspace)
+    if args.command == "setup":
+        if args.root is not None or explicit_scope:
+            raise MailboxError("use setup /absolute/path [--route CONNECTION:SLUG_OR_UUID ...]")
+        save_local_config(args.mailbox_root, args.install_dir, args.route)
+        return
+    saved_root, saved_routes = load_local_config()
+    root = check_root(args.root or saved_root or os.environ.get("BRIDGE_ROOT"))
+    same_root = saved_root is not None and os.path.realpath(root) == os.path.realpath(saved_root)
+    routes = saved_routes if same_root else ()
+    if explicit_scope and routes and explicit_scope not in routes:
+        raise MailboxError("connection/workspace is not in this project's configured routes")
+    scope = explicit_scope or (routes[0] if len(routes) == 1 and args.command != "scopes" else ())
+    if len(routes) > 1 and args.command not in {"list", "scopes"} and not explicit_scope:
+        raise MailboxError("multiple project routes; use the selected event's --connection and --workspace from list")
+    if args.command == "submit" and args.yes and (args.rebind or not scope):
+        raise MailboxError("--yes requires a scoped reply and cannot be used with --rebind")
     root_fd = os.open(root, DIR_FLAGS)
     try:
         if args.command == "scopes":
@@ -566,34 +729,12 @@ def run(args):
                 raise MailboxError("scopes lists all outboxes; do not specify selectors")
             emit(available_scopes(root_fd))
             return
+        if args.command == "list":
+            list_events(root_fd, (explicit_scope,) if explicit_scope else routes or ((),), args)
+            return
         outbox = Outbox(scoped_dir(root_fd, "outbox", scope), scope)
         try:
-            if args.command == "list":
-                if not 1 <= args.limit <= MAX_LIST:
-                    raise MailboxError(f"limit must be 1–{MAX_LIST}")
-                issue_id = require_id(args.issue_id) if args.issue_id is not None else None
-                run_id = require_id(args.run_id) if args.run_id is not None else None
-                selected = (x for x in events(outbox)
-                            if (issue_id is None or x[1]["issue_id"] == issue_id)
-                            and (run_id is None or x[1]["run_id"] == run_id))
-                directory = pickup_dir(root_fd, scope) if args.unread else None
-                try:
-                    ack_map = {}
-                    def unread(e):
-                        if e["kind"] not in UNREAD_KINDS:
-                            return False
-                        issue = e["issue_id"]
-                        if issue not in ack_map:
-                            ack_map[issue] = set(read_pickup(directory, issue)["acknowledged"])
-                        return e["id"] not in ack_map[issue]
-                    if args.unread:
-                        selected = (x for x in selected if unread(x[1]))
-                    newest = heapq.nlargest(args.limit, selected, key=lambda x: (x[0], x[1]["id"]))
-                    emit([metadata(e) for _, e in newest])
-                finally:
-                    if directory is not None:
-                        os.close(directory)
-            elif args.command == "read":
+            if args.command == "read":
                 e = load_event(outbox, args.event_id)
                 body = e.get("body", "")
                 if not isinstance(body, str):
@@ -640,6 +781,8 @@ def run(args):
                 original = json_file(args.draft_path)
                 item = rebind_draft(outbox, original, args.rebind) if args.rebind else original
                 request = resolve_request(outbox, item)
+                if args.yes and request["kind"] != "reply":
+                    raise MailboxError("--yes only supports ordinary replies; completion requires terminal confirmation")
                 inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
                 try:
                     shelf = issue_inbox(inbox, request["issue_id"], create=True)
@@ -647,19 +790,20 @@ def run(args):
                         validate(outbox, shelf, request)
                         if args.rebind:
                             validate_rebind_source(outbox, shelf, original)
-                        if not confirm(request, item["event_id"], original["request"] if args.rebind else None):
+                        if not args.yes and not confirm(request, item["event_id"], original["request"] if args.rebind else None):
                             raise MailboxError("submission cancelled; no request was written")
-                        # Re-check the named event and latest evidence after operator input.
-                        # The shelf must still be the same real directory, not a link or replacement.
-                        verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
-                        verify_scope_directory(root_fd, "inbox", scope, inbox)
-                        resolve_request(outbox, item)
-                        if args.rebind and rebind_draft(outbox, original, args.rebind) != item:
-                            raise MailboxError("rebind target changed during confirmation")
                         verified = issue_inbox(inbox, request["issue_id"])
                         try:
+                            # Serialize the final check and publish across CLI writers,
+                            # without holding the lock while an operator reviews a draft.
+                            fcntl.flock(verified, fcntl.LOCK_EX)
+                            verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
+                            verify_scope_directory(root_fd, "inbox", scope, inbox)
                             if not os.path.samestat(os.fstat(shelf), os.fstat(verified)):
                                 raise MailboxError("issue inbox changed during confirmation")
+                            resolve_request(outbox, item)
+                            if args.rebind and rebind_draft(outbox, original, args.rebind) != item:
+                                raise MailboxError("rebind target changed during confirmation")
                             validate(outbox, verified, request)
                             if args.rebind:
                                 validate_rebind_source(outbox, verified, original)

@@ -7,12 +7,18 @@ import os
 from pathlib import Path
 import pty
 import select
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+
+LINE_A = "10000000-0000-4000-8000-000000000001"
+LINE_B = "10000000-0000-4000-8000-000000000002"
+LINE_EMPTY = "10000000-0000-4000-8000-000000000003"
+PRIVATE = "20000000-0000-4000-8000-000000000001"
 
 SCRIPT = Path(__file__).with_name("mailbox.py")
 spec = importlib.util.spec_from_file_location("bridge_mailbox_cli", SCRIPT)
@@ -344,6 +350,139 @@ class MailboxCLI(unittest.TestCase):
             event.update(connection_id=connection, workspace_id=workspace)
             (directory / name).write_text(json.dumps(event))
         return ("--connection", connection, "--workspace", workspace), directory
+
+    def project_tool(self, name, fake_path=None):
+        script = self.root / name / "scripts" / "mailbox.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        def invoke(*args, success=True, root=None):
+            env = {k: v for k, v in os.environ.items() if k != "BRIDGE_ROOT"}
+            if root is not None:
+                env["BRIDGE_ROOT"] = str(root)
+            if fake_path is not None:
+                env["PATH"] = str(fake_path) + os.pathsep + os.defpath
+            result = subprocess.run([sys.executable, "-B", str(script), *map(str, args)],
+                                    env=env, cwd=self.root, capture_output=True,
+                                    start_new_session=True, timeout=8)
+            self.assertEqual(result.returncode == 0, success, result.stderr)
+            return json.loads(result.stdout) if success else result.stderr.decode()
+        return invoke
+
+    def test_setup_resolves_slugs_per_connection_without_first_task(self):
+        install = self.root / "bridge-install"
+        data = install / "data"
+        (data / "outbox").mkdir(parents=True)
+        (install / "compose.yaml").touch()
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        calls = self.root / "docker-calls.jsonl"
+        docker = fake_bin / "docker"
+        docker.write_text(f"""#!{sys.executable}
+import json, os, sys
+args = sys.argv[1:]
+connection = args[args.index("--profile") + 1]
+with open({str(calls)!r}, "a") as log:
+    log.write(json.dumps([os.getcwd(), args]) + "\\n")
+rows = {{"cloud": [{{"slug": "engineering", "id": {LINE_A!r}}},
+                  {{"slug": "operations", "id": {LINE_B!r}}}],
+         "office": [{{"slug": "engineering", "id": {PRIVATE!r}}}]}}
+print(json.dumps(rows[connection]))
+""")
+        docker.chmod(0o700)
+        project = self.project_tool("slug-project", fake_bin)
+        result = project("setup", data, "--route", "cloud:engineering", "--route", "cloud:operations",
+                         "--route", "office:engineering")
+        self.assertEqual([(r["connection_id"], r["workspace_id"]) for r in result["routes"]],
+                         [("cloud", LINE_A), ("cloud", LINE_B), ("office", PRIVATE)])
+        invocations = [json.loads(row) for row in calls.read_text().splitlines()]
+        self.assertEqual(len(invocations), 2)
+        for (cwd, args), connection in zip(invocations, ("cloud", "office")):
+            self.assertEqual(Path(cwd), install.resolve())
+            self.assertEqual(args, ["compose", "--project-directory", str(install), "-f",
+                                    str(install / "compose.yaml"), "exec", "-T", "-e",
+                                    f"HOME=/bridge-runtime/{connection}/home", "bridge", "multica",
+                                    "--profile", connection, "workspace", "list", "--output", "json"])
+        self.assertEqual(project("list", "--unread"), [])
+        self.assertEqual(len(calls.read_text().splitlines()), 2)
+        path = Path(result["config_path"])
+        before = path.read_bytes()
+        self.assertIn("no unique workspace", project("setup", data, "--route", "cloud:engineering",
+                                                     "--route", "office:operations", success=False))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertIn("cannot look up", project("setup", data, "--route", "unknown:operations", success=False))
+        self.assertEqual(path.read_bytes(), before)
+        alternate_data = self.root / "elsewhere" / "data"
+        (alternate_data / "outbox").mkdir(parents=True)
+        self.assertIn("--install-dir", project("setup", alternate_data, "--route",
+                                               "cloud:engineering", success=False))
+        self.assertEqual(project("setup", alternate_data, "--install-dir", install, "--route",
+                                 "cloud:engineering")["routes"][0]["workspace_id"], LINE_A)
+
+    def test_project_routes_filter_list_and_do_not_route_by_issue_key(self):
+        alpha, _ = self.scoped_fixture("cloud", LINE_A)
+        beta, _ = self.scoped_fixture("cloud", LINE_B)
+        third, _ = self.scoped_fixture("internal", PRIVATE)
+        project = self.project_tool("monorepo")
+        result = project("setup", self.root, "--route", f"cloud:{LINE_A}", "--route", f"cloud:{LINE_B}",
+                         "--route", f"cloud:{LINE_EMPTY}")
+        config_path = self.root / "monorepo" / "mailbox.local.json"
+        self.assertEqual(Path(result["config_path"]), config_path.resolve())
+        self.assertEqual(json.loads(config_path.read_text()), {"root": str(self.root), "routes": result["routes"]})
+        rows = project("list", "--unread", "--issue-id", "issue-1")
+        self.assertEqual({(e["connection_id"], e["workspace_id"]) for e in rows},
+                         {("cloud", LINE_A), ("cloud", LINE_B)})
+        self.assertEqual(len(rows), 4)
+        self.assertIn("multiple project routes", project("read", "task-1", success=False))
+        self.assertIn("not in this project", project(*third, "list", success=False))
+        self.assertIn("not in this project",
+                      project("--root", f"{self.root}/.", *third, "list", success=False))
+        project(*alpha, "ack", "task-1")
+        self.assertEqual(len(project("list", "--unread")), 3)
+        self.assertEqual(len(project(*beta, "list", "--unread")), 2)
+        other = self.project_tool("other-repo")
+        other("setup", self.root, "--route", f"internal:{PRIVATE}")
+        self.assertEqual(other("read", "task-1")["connection_id"], "internal")
+        self.assertEqual({e["connection_id"] for e in project("list")}, {"cloud"})
+        self.assertIn("invalid mailbox ID", project("setup", self.root, "--route",
+                                                   "cloud:..", success=False))
+        self.assertEqual(len(project("list")), 4)
+
+    def test_root_override_does_not_inherit_routes(self):
+        self.scoped_fixture("cloud", LINE_A)
+        project = self.project_tool("one")
+        project("setup", self.root, "--route", f"cloud:{LINE_A}")
+        self.assertEqual(project("read", "task-1")["workspace_id"], LINE_A)
+        alternate = self.root / "alternate"
+        (alternate / "outbox").mkdir(parents=True)
+        self.assertEqual(project("read", "task-1", root=alternate)["workspace_id"], LINE_A)
+        self.assertEqual(project("--root", alternate, "list"), [])
+        self.assertEqual(self.project_tool("no-project-config")("list", root=alternate), [])
+
+    def test_authorized_scoped_reply_without_tty_keeps_guards(self):
+        alpha, _ = self.scoped_fixture("cloud", LINE_A)
+        beta, _ = self.scoped_fixture("cloud", LINE_B)
+        project = self.project_tool("one")
+        project("setup", self.root, "--route", f"cloud:{LINE_A}", "--route", f"cloud:{LINE_B}")
+        path = self.root / "project-draft.json"
+        def draft(kind):
+            item = project(*alpha, "draft", "comment-1", "--kind", kind, "--body-file", self.body)
+            path.write_text(json.dumps(item))
+            return item
+        draft("complete")
+        self.assertIn("completion requires", project(*alpha, "submit", path, "--yes", success=False))
+        item = draft("reply")
+        self.assertIn("cannot be used with --rebind",
+                      project(*alpha, "submit", path, "--yes", "--rebind", "task-1", success=False))
+        self.assertIn("does not match", project(*beta, "submit", path, "--yes", success=False))
+        self.assertIn("/dev/tty", project(*alpha, "submit", path, success=False))
+        request = item["request"]
+        self.assertEqual(project(*alpha, "submit", path, "--yes")["request_id"], request["id"])
+        self.assertIn("already exists", project(*alpha, "submit", path, "--yes", success=False))
+        draft("reply")
+        self.assertIn("unreceipted request", project(*alpha, "submit", path, "--yes", success=False))
+        files = list(self.inbox.rglob("*.json"))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(json.loads(files[0].read_text()), request)
 
     def test_discover_and_read_only_exact_scope(self):
         scope, directory = self.scoped_fixture("alpha", "workspace-1")
