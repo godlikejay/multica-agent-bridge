@@ -28,9 +28,8 @@ printf 'BRIDGE_UID=%s\nBRIDGE_GID=%s\nBRIDGE_IMAGE=multica-agent-bridge:local\n'
 
 Edit `connections.json` for the test service, then continue at
 [Save a token and start](../deploy/README.md#2-save-a-token-and-start).
-Use a disposable workspace; for fixture-based integration tests, see the
-[single-service](../e2e/README.md) and [two-service](../e2e/multi/README.md)
-runbooks.
+Use a disposable workspace. To verify the integration against real Multica,
+run the [Docker smoke test](../e2e/README.md).
 
 The [image workflow](../.github/workflows/container.yml) publishes Linux
 amd64 and arm64 images as `latest` and `sha-<full-git-commit>`. Use a reviewed

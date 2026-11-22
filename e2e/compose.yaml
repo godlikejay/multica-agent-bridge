@@ -82,7 +82,7 @@ services:
       MULTICA_WORKSPACES_ROOT: /workspaces
       MULTICA_DAEMON_AUTO_UPDATE: "false"
       MULTICA_DAEMON_AUTO_RELOAD: "false"
-      MULTICA_DAEMON_MAX_CONCURRENT_TASKS: "${BRIDGE_MAX_ACTIVE_RUNS:-2}"
+      MULTICA_DAEMON_MAX_CONCURRENT_TASKS: "1"
     volumes:
       - ./.local/home:/home/runtime
       - ./.local/workspaces:/workspaces

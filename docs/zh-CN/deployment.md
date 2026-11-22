@@ -26,8 +26,7 @@ printf 'BRIDGE_UID=%s\nBRIDGE_GID=%s\nBRIDGE_IMAGE=multica-agent-bridge:local\n'
 
 把 `connections.json` 指向测试服务，从[保存令牌，启动](../../deploy/README.zh-CN.md#2-保存令牌启动)
 继续，并使用隔离的工作区。
-集成测试另见[单服务](../../e2e/README.md)和
-[双服务](../../e2e/multi/README.md)的测试说明。
+要验证真实 Multica 接口，见 [Docker 冒烟测试](../../e2e/README.md)。
 
 [镜像构建流程](../../.github/workflows/container.yml)发布 Linux amd64 和 arm64 版本，
 提供 `latest` 和 `sha-<完整提交哈希>` 标签。需要精确锁定时，使用已核验的镜像 digest。

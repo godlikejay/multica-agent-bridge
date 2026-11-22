@@ -10,14 +10,21 @@ coding agent, read real credentials, or connect to an outside workspace.
 | Task identity, comments, API transport | `internal/multica` |
 | JSON files, replay and run epochs | `internal/mailbox`, `internal/bridge` and [protocol](docs/protocol.md) |
 | Runtime image and day-to-day deployment | [Dockerfile](Dockerfile), [deploy/compose.yaml](deploy/compose.yaml), [local build](docs/deployment.md) and [operator install](deploy/README.md) |
-| Real Multica acceptance | [Single service](e2e/README.md), [two services](e2e/multi/README.md) |
+| Real Multica acceptance | [One Docker smoke test](e2e/README.md) |
 | Daemon supervision and connection settings | `internal/supervisor`, [connection configuration](deploy/README.md#connection-settings) |
 | Public mailbox tool and user Skill | [skills/multica-bridge](skills/multica-bridge/SKILL.md) |
 
-Add a deterministic regression to the relevant package. Run real integration
-checks separately on a disposable Docker stack. Record upstream version, test
-command, outcome, and which layer was actually exercised. Fixture success is not
-proof that a real Daemon registered or the server completed a Run.
+Keep scheduling, delivery, and isolation regressions offline: the bridge tests
+cover independent Issues and endpoints, follow-up delivery and stale requests;
+the client and supervisor tests cover the API contract, routing and recovery.
+Run the Docker smoke separately on a disposable stack to prove real Multica
+claim, reply and completion. Record upstream version, command, and outcome;
+fixture success is not proof of a real Run.
+
+When upgrading Multica, update the pinned upstream images in `Dockerfile` and
+`e2e/compose.yaml` together. Check the task API and ACP contract against the new
+source, adjust offline fixtures only for real contract changes, then run the
+same Docker smoke against the new pin before merging.
 
 Examples and fixtures must use invented data. Keep test state, authentication,
 and local path mappings out of Git. Avoid parallel instruction sets or changes
