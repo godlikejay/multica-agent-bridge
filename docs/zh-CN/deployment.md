@@ -3,7 +3,7 @@
 [English](../deployment.md) | 简体中文
 
 日常使用按[现成镜像安装指南](../../deploy/README.zh-CN.md)操作。镜像已包含
-Multica daemon 和 Bridge；只有测试运行镜像本身的改动时，才需要从源码构建。
+Multica daemon 和 Bridge。如果想自行构建或测试镜像改动，使用仓库根目录的 [`Dockerfile`](../../Dockerfile)。
 
 在仓库目录运行：
 

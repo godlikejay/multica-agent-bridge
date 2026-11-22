@@ -3,8 +3,8 @@
 English | [简体中文](zh-CN/deployment.md)
 
 To run Bridge, follow the [Docker Compose install guide](../deploy/README.md).
-The published image already contains Multica Daemon and Bridge. Build from a
-checkout only when testing changes to the runtime image.
+The published image already contains Multica Daemon and Bridge. To build your
+own image or test runtime changes, use the repository-root [`Dockerfile`](../Dockerfile).
 
 From the checkout:
 

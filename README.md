@@ -18,10 +18,14 @@ runtime image includes Multica Daemon and Bridge. You do not need Go, a model
 API key, or a separate Daemon installation. The host mailbox tool uses
 Python 3 (standard library only).
 
-Start with the [image-only install guide](deploy/README.md): download two
-small config files, save your Multica token, and run `docker compose up -d`.
-No Git checkout is required. The same Compose file supports one or more
-Multica connections.
+- **Use the published image (recommended):** [Install without cloning](deploy/README.md).
+  Download two config files, save your Multica token, then run `docker compose up -d`.
+- **Build your own image:** Use the repository-root [`Dockerfile`](Dockerfile).
+  Run `docker build -t multica-agent-bridge:local .` from the source checkout,
+  then set `BRIDGE_IMAGE=multica-agent-bridge:local` in your install directory's
+  `.env`. See the [build guide](docs/deployment.md) for the full steps.
+
+Both options use the same Compose configuration for one or more connections.
 
 After the mailbox works, install the [coding agent skill](docs/agent-integration.md)
 for Codex, Antigravity CLI, or Oh My Pi. The skill drafts replies; you decide

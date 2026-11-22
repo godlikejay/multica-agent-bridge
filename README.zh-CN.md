@@ -8,8 +8,10 @@ Multica 派任务，Bridge 把任务写到本地，你自己的 Codex、agy 或 
 
 已有 Multica 服务和 Docker Compose 即可开始。镜像内置 Multica daemon 和 Bridge，不用自己安装 Go 或再装一套 Multica 服务。操作邮箱的脚本需要 Python 3。
 
-1. [用现成镜像安装](deploy/README.zh-CN.md)：下载 Compose 和配置文件，存好令牌，执行 `docker compose up -d`。不用 clone；同一份 Compose 能接一套或多套服务。
-2. [接入你自己的 Agent](docs/zh-CN/agent-integration.md)：Codex、agy、OMP 共用一份 Skill。也可以不装 Skill，直接在终端操作。
+- **用现成镜像（推荐）**：[免 clone 安装](deploy/README.zh-CN.md)。下载两个配置文件，保存 Multica 令牌，再运行 `docker compose up -d`。
+- **自己构建镜像**：用仓库根目录的 [`Dockerfile`](Dockerfile)。拿到源码后，在仓库根目录执行 `docker build -t multica-agent-bridge:local .`，再在安装目录的 `.env` 中设置 `BRIDGE_IMAGE=multica-agent-bridge:local`。[完整构建步骤](docs/zh-CN/deployment.md)
+
+两种方式都用同一份 Compose，可以配置一条或多条连接。装好后可以[接入 Codex、agy 或 OMP](docs/zh-CN/agent-integration.md)，也可以直接在终端操作邮箱。
 
 [中文文档目录](docs/zh-CN/README.md) · [English documentation](docs/README.md)
 
