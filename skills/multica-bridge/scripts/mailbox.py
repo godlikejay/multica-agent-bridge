@@ -700,7 +700,7 @@ def parser():
     submit = commands.add_parser("submit")
     submit.add_argument("draft_path", type=Path)
     submit.add_argument("--rebind", metavar="NEW_EVENT_ID")
-    submit.add_argument("--yes", action="store_true", help="submit an already authorized scoped reply without a terminal prompt")
+    submit.add_argument("--yes", action="store_true", help="submit an authorized scoped reply or completion without a terminal prompt")
     return p
 
 
@@ -721,7 +721,7 @@ def run(args):
     if len(routes) > 1 and args.command not in {"list", "scopes"} and not explicit_scope:
         raise MailboxError("multiple project routes; use the selected event's --connection and --workspace from list")
     if args.command == "submit" and args.yes and (args.rebind or not scope):
-        raise MailboxError("--yes requires a scoped reply and cannot be used with --rebind")
+        raise MailboxError("--yes requires a scoped request and cannot be used with --rebind")
     root_fd = os.open(root, DIR_FLAGS)
     try:
         if args.command == "scopes":
@@ -781,8 +781,6 @@ def run(args):
                 original = json_file(args.draft_path)
                 item = rebind_draft(outbox, original, args.rebind) if args.rebind else original
                 request = resolve_request(outbox, item)
-                if args.yes and request["kind"] != "reply":
-                    raise MailboxError("--yes only supports ordinary replies; completion requires terminal confirmation")
                 inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
                 try:
                     shelf = issue_inbox(inbox, request["issue_id"], create=True)

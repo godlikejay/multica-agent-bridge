@@ -468,8 +468,6 @@ print(json.dumps(rows[connection]))
             item = project(*alpha, "draft", "comment-1", "--kind", kind, "--body-file", self.body)
             path.write_text(json.dumps(item))
             return item
-        draft("complete")
-        self.assertIn("completion requires", project(*alpha, "submit", path, "--yes", success=False))
         item = draft("reply")
         self.assertIn("cannot be used with --rebind",
                       project(*alpha, "submit", path, "--yes", "--rebind", "task-1", success=False))
@@ -483,6 +481,28 @@ print(json.dumps(rows[connection]))
         files = list(self.inbox.rglob("*.json"))
         self.assertEqual(len(files), 1)
         self.assertEqual(json.loads(files[0].read_text()), request)
+
+    def test_authorized_completion_without_tty_keeps_run_binding(self):
+        _, outbox = self.scoped_fixture("cloud", LINE_A)
+        project = self.project_tool("completion-project")
+        project("setup", self.root, "--route", f"cloud:{LINE_A}")
+        path = self.root / "completion.json"
+        draft = project("draft", "task-1", "--kind", "complete", "--body-file", self.body)
+        path.write_text(json.dumps(draft))
+        self.assertIn("/dev/tty", project("submit", path, success=False))
+        self.assertIn("cannot be used with --rebind",
+                      project("submit", path, "--yes", "--rebind", "task-1", success=False))
+        newer = json.loads((outbox / "task-1.json").read_text())
+        newer.update(id="task-2", run_id="run-2", epoch=2)
+        (outbox / "task-2.json").write_text(json.dumps(newer))
+        self.assertIn("stale", project("submit", path, "--yes", success=False))
+        self.assertEqual(list(self.inbox.rglob("*.json")), [])
+        draft = project("draft", "task-2", "--kind", "complete", "--body-file", self.body)
+        path.write_text(json.dumps(draft))
+        self.assertEqual(project("submit", path, "--yes")["status"], "submitted_to_local_inbox")
+        files = list(self.inbox.rglob("*.json"))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(json.loads(files[0].read_text()), draft["request"])
 
     def test_discover_and_read_only_exact_scope(self):
         scope, directory = self.scoped_fixture("alpha", "workspace-1")

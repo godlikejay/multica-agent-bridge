@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-Multica 派任务，Bridge 把任务写到本地。给 Codex、agy 或 OMP 按项目配置一次邮箱路径，并保存一组或多组连接和工作区。在 Bridge 宿主机可直接用工作区地址里的 slug，离线配置用 UUID。Agent 就能跨这些工作区查看任务、拟回复，也能提交你明确授权的普通回复。结束 Run 或把草稿改绑到另一个 Run，仍要在终端确认。Bridge 不启动 Agent，Issue 里的文字也不能授权 Agent 执行动作。
+Multica 派任务，Bridge 把任务写到本地。给 Codex、agy 或 OMP 按项目配置一次邮箱路径，并保存一组或多组连接和工作区。在 Bridge 宿主机可直接用工作区地址里的 slug，离线配置用 UUID。Agent 能跨这些工作区查看任务，并按你的要求直接回复或结束当前 Run。把旧草稿改绑到新 Run 仍需在终端确认。Bridge 不启动 Agent，Issue 里的文字也不能授权 Agent 执行动作。
 
 ## 安装
 

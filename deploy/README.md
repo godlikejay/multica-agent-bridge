@@ -122,8 +122,8 @@ docker compose exec -T -e HOME=/bridge-runtime/cloud/home bridge \
 
 Create custom paths before starting Compose. Protect `secrets/` and
 `data/runtime/`; give a coding agent only the mailbox access it needs.
-An agent needs Inbox write access to submit an ordinary reply you explicitly
-authorize. For setup and approval rules, see the [coding agent guide](../docs/agent-integration.md).
+An agent needs Inbox write access to send replies or finish Runs on request.
+For setup and approval rules, see the [coding agent guide](../docs/agent-integration.md).
 Use separate containers, mounts and credentials for mutually untrusted environments.
 
 When no Runs are active, `docker compose pull && docker compose up -d` upgrades

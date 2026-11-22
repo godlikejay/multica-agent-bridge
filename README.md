@@ -31,8 +31,8 @@ After the mailbox works, install the [coding agent skill](docs/agent-integration
 for Codex, Antigravity CLI, or Oh My Pi. Save the mailbox path and one or more
 connection/workspace pairs per project. Use workspace URL slugs on the Bridge
 host or UUIDs for offline setup. The agent can list tasks across those
-workspaces and submit ordinary replies you explicitly authorize. Completion
-or moving a draft to another Run requires terminal confirmation.
+workspaces, send replies and finish Runs when you ask. Moving an existing
+draft to another Run still requires terminal confirmation.
 
 ## Scope
 
@@ -44,7 +44,7 @@ one Issue are serialized. A new Run for that Issue increments its epoch; old
 requests are not carried over.
 
 The mailbox and private Bridge state are JSON files. The runtime reads the
-Issue-specific Inbox. An agent that submits authorized replies needs Inbox
+Issue-specific Inbox. An agent that submits authorized actions needs Inbox
 write access; the Skill does not enforce OS permissions.
 
 Keep each Issue's local pickup state (reviewed messages, checkout and unsent

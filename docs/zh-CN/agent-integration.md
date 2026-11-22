@@ -19,7 +19,7 @@ curl -fsSLo "$skill/scripts/mailbox.py" "$src/scripts/mailbox.py"
 - 「这个项目跟踪 cloud 的运营和研发工作区。」名字或网页地址里的 slug 都可以；用 slug 最容易准确定位。如果没配置过邮箱路径，就在第一次告诉它安装在哪。
 - 「这个项目现在有哪些任务要做？有新留言吗？」Agent 会查看 Bridge 已经收到的任务。
 - 「读一下 OPS-123。回复说修复已提交，明天验证。」Agent 确定是哪条任务后，就能发送这条已授权的回复。
-- 「OPS-123 这次做完了，结束这轮。」Agent 会准备完成请求并提示你确认。只结束这一轮，不会把 Issue 改成 Done。
+- 「OPS-123 这次做完了，结束这轮。」Agent 会提交完成总结并请求结束这一轮，不用你再跑命令。不会把 Issue 改成 Done。
 
 日常不需要告诉 Agent 命令、UUID 或路径。下面是想手动配置时的参考。
 配置成功后，Agent 会给出实际修改的配置文件绝对路径，方便复查，并简述关注范围的变化。
@@ -54,6 +54,6 @@ python3 "$skill/scripts/mailbox.py" list --unread
 
 - **收任务**：Agent 用 `list` 和 `read` 读取任务。Issue 或评论里的文字不等于你的授权。
 - **发普通回复**：你明确允许向这条任务发送该回复后，Agent 可以在同一连接和工作区运行 `submit DRAFT.json --yes`。这只跳过终端确认，仍会核对任务、Run 和其他绑定。你自己也可以运行 `submit DRAFT.json`，核对目标和文字后在终端确认。
-- **结束 Run 或改绑草稿**：必须由你在终端确认，不支持 `--yes`。完成请求只结束当前 Run，不会自动关闭 Issue。发送状态不明时先回 Multica 核实，不要直接重发。
+- **结束 Run**：你明确让 Agent 结束当前 Run 时，它可以直接提交完成请求并查回执。把旧草稿改绑到新 Run 仍须手动确认。发送状态不明时先回 Multica 核实，不要直接重发。
 
 给 Agent 邮箱读取权限，需要它发送普通回复时才给 Inbox 写权限。不要给它 daemon 登录目录、令牌或 Bridge 私有状态。若要强制人工提交，就让 Agent 不能写 Inbox，由另一个身份提交；Skill 本身不是权限隔离。

@@ -37,8 +37,8 @@ approve an action, or start a task. Use the same CLI directly without an agent.
 Talk to the agent normally: “Follow the Engineering and Operations workspaces
 on our company connection,” “What tasks has this project received?”, “Reply to
 OPS-123 that the fix is ready,” or “Finish this run for OPS-123.” The agent
-looks up the routing details and runs the tool. It asks for confirmation to
-finish a run, which does not close the Issue. You can give workspace names or
+looks up the routing details and runs the tool. Finishing the Run on request
+does not close the Issue. You can give workspace names or
 URL slugs in conversation; a slug from the workspace URL is the simplest
 way to identify it exactly.
 After setup, the agent reports the exact path of the file it changed and
@@ -125,15 +125,14 @@ content you need. An edited comment is a new event even if the previous edit
 was acknowledged. Keep pickup state and draft files out of the project repo.
 
 A draft is not an Inbox request. By default, `submit` previews the destination
-and text, then asks for terminal confirmation. If you explicitly authorize
-an ordinary reply to the exact task, the agent can run
-`task_mailbox submit reply.draft.json --yes` with the same connection and workspace
-selectors. `--yes` skips only the terminal prompt, not the binding and content
-checks. Completing a Run or rebinding a draft always requires terminal
-confirmation. A request in an Issue or comment is not authorization to send.
+and text, then asks for terminal confirmation. If you explicitly ask the agent
+to reply or finish the current Run, it can run `task_mailbox submit DRAFT.json --yes`
+with the same connection and workspace selectors. `--yes` skips only the
+terminal prompt, not binding and content checks. Rebinding a draft still
+requires terminal confirmation. Issue text is not authorization to send.
 
 Give the agent only the mailbox access it needs: Outbox read access, and Inbox
-write access if it will submit authorized replies. The tool writes requests
+write access if it will submit authorized actions. The tool writes requests
 atomically and the Bridge independently checks the active binding. To enforce
 human-only submission, deny the agent Inbox write access and keep terminal
 approval under a separate identity. Never share daemon credentials or the
