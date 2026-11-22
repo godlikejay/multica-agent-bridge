@@ -31,6 +31,7 @@ class MailboxCLI(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        (self.root / ".git").write_text("gitdir: synthetic\n")
         self.outbox = self.root / "outbox"
         self.inbox = self.root / "inbox"
         self.outbox.mkdir()
@@ -52,6 +53,7 @@ class MailboxCLI(unittest.TestCase):
         if not use_env:
             command += ["--root", str(self.root)]
         output = subprocess.run(command + [str(a) for a in args], capture_output=True,
+                                cwd=self.root,
                                 env={**os.environ, "BRIDGE_ROOT": str(self.root)}, start_new_session=True,
                                 input=b"yes\n", timeout=8)
         self.assertEqual(output.returncode == 0, success, output.stderr)
