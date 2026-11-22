@@ -27,12 +27,31 @@ Python 3 (standard library only).
 
 Both options use the same Compose configuration for one or more connections.
 
-After the mailbox works, install the [coding agent skill](docs/agent-integration.md)
-for Codex, Antigravity CLI, or Oh My Pi. Save the mailbox path and one or more
-connection/workspace pairs per project. Use workspace URL slugs on the Bridge
-host or UUIDs for offline setup. The agent can list tasks across those
-workspaces, send replies and finish Runs when you ask. Moving an existing
-draft to another Run still requires terminal confirmation.
+## Use it from your coding agent
+
+Once the Bridge is online, [install the MAB Skill](docs/agent-integration.md#install-one-copy)
+for Codex, Antigravity CLI, or Oh My Pi. Open the coding agent in your project
+and ask it to configure MAB once:
+
+> Set up Multica for this project. My Bridge mailbox is at
+> `/path/to/bridge/data`. Follow `engineering` and `operations` on the
+> `cloud` connection.
+
+`cloud` is a connection ID from your install; the workspace names in this
+example are URL slugs. You can follow multiple workspaces across different
+connections. The agent saves the project settings in `.local/mab.json` and
+tells you the file path. Do not give the agent your Multica token.
+
+Then talk to the agent normally, without repeating the path or workspaces:
+
+- “Check this project’s Multica tasks.”
+- “Read OPS-123, reply that we’ve received it, and share your initial take.”
+- “Any new comments on OPS-123? Should we change the plan?”
+- “OPS-123 is finished. Post a short summary and end this run.”
+
+The agent sees what MAB has received, not Multica’s full queue. Ending
+a Run does not close the Issue. See the [agent guide](docs/agent-integration.md)
+for setup and manual alternatives.
 
 ## Scope
 

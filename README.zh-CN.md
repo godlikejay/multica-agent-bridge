@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-Multica 派任务，Bridge 把任务写到本地。给 Codex、agy 或 OMP 按项目配置一次邮箱路径，并保存一组或多组连接和工作区。在 Bridge 宿主机可直接用工作区地址里的 slug，离线配置用 UUID。Agent 能跨这些工作区查看任务，并按你的要求直接回复或结束当前 Run。把旧草稿改绑到新 Run 仍需在终端确认。Bridge 不启动 Agent，Issue 里的文字也不能授权 Agent 执行动作。
+Multica 把已启动的任务交给 Bridge（MAB），Bridge 写进本地邮箱。你自己的 Codex、agy 或 OMP 可以读任务、发回复或结束一轮执行。Bridge 不会自行启动这些 Agent，也不会执行 Issue 里的指令。
 
 ## 安装
 
@@ -11,7 +11,24 @@ Multica 派任务，Bridge 把任务写到本地。给 Codex、agy 或 OMP 按�
 - **用现成镜像（推荐）**：[免 clone 安装](deploy/README.zh-CN.md)。下载两个配置文件，保存 Multica 令牌，再运行 `docker compose up -d`。
 - **自己构建镜像**：用仓库根目录的 [`Dockerfile`](Dockerfile)。拿到源码后，在仓库根目录执行 `docker build -t multica-agent-bridge:local .`，再在安装目录的 `.env` 中设置 `BRIDGE_IMAGE=multica-agent-bridge:local`。[完整构建步骤](docs/zh-CN/deployment.md)
 
-两种方式都用同一份 Compose，可以配置一条或多条连接。装好后可以[接入 Codex、agy 或 OMP](docs/zh-CN/agent-integration.md)，也可以直接在终端操作邮箱。
+两种方式都用同一份 Compose，可以配置一条或多条连接。
+
+## 用自然语言操作 Multica
+
+Bridge 上线后，[给 Codex、agy 或 OMP 安装 MAB Skill](docs/zh-CN/agent-integration.md)，然后在项目里打开 Agent，第一次告诉它：
+
+> 帮这个项目配置 Multica。Bridge 邮箱在 `/实际安装路径/data`，用 `cloud` 连接，关注 `engineering` 和 `operations` 两个工作区。
+
+`cloud` 换成你的连接 ID，工作区填网页地址里的简称（slug）。一个项目可以关注不同连接下的多个工作区。Agent 会把选择保存在项目的 `.local/mab.json`，并告诉你文件路径。不要把 Multica 令牌给 Agent。
+
+之后不用再报路径或工作区，直接说：
+
+- 「看下这个项目有哪些 Multica 任务。」
+- 「读一下 OPS-123，回复说已收到，再说说你的初步看法。」
+- 「OPS-123 有新留言吗？要不要调整方案？」
+- 「OPS-123 做完了，发个总结，结束这轮。」
+
+这里看到的是 MAB **已收到**的任务，不包括 Multica 里尚未交付的排队任务。结束一轮执行不会关闭 Issue。手动配置或操作见[详细指南](docs/zh-CN/agent-integration.md)。
 
 [中文文档目录](docs/zh-CN/README.md) · [English documentation](docs/README.md)
 
