@@ -30,8 +30,15 @@ func main() {
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "connection" {
+		if err := supervisor.Control(ctx, args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "bridge connection:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) != 1 || args[0] != "acp" {
-		fmt.Fprintln(os.Stderr, "usage: multica-bridge acp | --version | serve --config PATH")
+		fmt.Fprintln(os.Stderr, "usage: multica-bridge acp | --version | serve --config PATH | connection {start|stop|status}")
 		os.Exit(2)
 	}
 	err := acp.Serve(ctx, os.Stdin, os.Stdout, func(ctx context.Context, _ acp.Prompt) (string, error) {

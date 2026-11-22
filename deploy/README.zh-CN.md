@@ -65,7 +65,7 @@ mailbox submit "$draft_dir/reply.json"
 
 ## 连接配置
 
-一条或多条连接都用同一份 `connections.json` 和 Compose。每条连接启动一个 daemon，对应一套服务和一个账号。同一工作区的不同项目不用分别启动 daemon。
+一条或多条连接都用同一份 `connections.json` 和 Compose。每条连接配置一个 daemon，对应一套服务和一个账号。同一工作区的不同项目不用分别启动 daemon。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -80,6 +80,27 @@ mailbox submit "$draft_dir/reply.json"
 ```sh
 docker compose exec -T -e HOME=/bridge-runtime/cloud/home bridge \
   multica --profile cloud daemon status --output json
+```
+
+## 启停连接
+
+在 Compose 安装目录执行。Bridge 容器保持运行；`company` 换成 `connections.json` 里的连接 ID：
+
+```sh
+docker compose exec bridge multica-bridge connection status
+docker compose exec bridge multica-bridge connection status company
+docker compose exec bridge multica-bridge connection stop company
+docker compose exec bridge multica-bridge connection start company
+```
+
+用相同前缀运行 `connection stop --all` 或 `connection start --all`，可一次停止或启动全部连接。停止连接可能打断正在跑的 Run，能等就先等它完成。停连接不会代替你完成 Run，也不会删除令牌、daemon 身份或邮箱数据。全部停止后，容器仍然运行，但不启动 daemon。停止状态保存在 runtime 挂载目录里，容器重启后仍然有效；要恢复连接，用 `connection start`。
+
+`connection status` 显示本地 daemon 状态，不代表已在 Multica 注册或上线。启动后到对应 Multica 网页确认 runtime 在线，再派任务。管理命令用容器内的 Unix socket，不需要开控制端口或挂载 Docker socket。如果不在安装目录，指定安装所用的 Compose 文件和环境文件：
+
+```sh
+docker compose --project-directory /path/to/install \
+  --env-file /path/to/install/.env -f /path/to/install/compose.yaml \
+  exec bridge multica-bridge connection status
 ```
 
 ## 挂载与升级

@@ -89,7 +89,7 @@ appears on the original Multica Issue.
 ## Connection settings
 
 Use the same `connections.json` and Compose for one or more connections.
-Each entry starts one daemon for a service and account. Multiple projects
+Each entry defines one daemon for a service and account. Multiple projects
 within the same workspace do not need separate daemons.
 
 | Setting | Meaning |
@@ -104,12 +104,45 @@ Save a separate token file for each entry. To apply changes to
 `connections.json`, wait for active Runs to finish, then run
 `docker compose up -d --force-recreate bridge`. Verify each configured runtime in
 its own Multica site before assigning a test Issue. If a connection does not
-come online, check the Compose logs for its ID. From the install directory,
-you can query one daemon directly (substitute its ID in both places):
+come online, check the Compose logs for its ID. For daemon diagnostics in
+addition to the connection status below, substitute its ID in both places:
 
 ```sh
 docker compose exec -T -e HOME=/bridge-runtime/cloud/home bridge \
   multica --profile cloud daemon status --output json
+```
+
+## Start or stop connections
+
+From the Compose install directory, leave the Bridge container running and
+use the connection ID from `connections.json` (here, `company`):
+
+```sh
+docker compose exec bridge multica-bridge connection status
+docker compose exec bridge multica-bridge connection status company
+docker compose exec bridge multica-bridge connection stop company
+docker compose exec bridge multica-bridge connection start company
+```
+
+Use `connection stop --all` or `connection start --all` with the same prefix
+to control all configured connections. Stopping a connection can interrupt
+its active Runs, so let them finish first when practical. It does not finish
+Runs on your behalf or delete credentials, runtime identity, or mailbox
+data. If all connections are stopped, the container stays up and idle.
+Stopped settings are saved under the runtime mount and survive container
+restarts. Use `connection start` to resume a stopped connection.
+
+`connection status` reports local daemon state, not registration in Multica.
+After starting a connection, confirm its runtime shows as online in the
+corresponding Multica site before assigning work. These commands use a local
+Unix socket inside the container; no control port or Docker socket mount is
+needed. To run from another directory, use the installation's Compose and
+environment files:
+
+```sh
+docker compose --project-directory /path/to/install \
+  --env-file /path/to/install/.env -f /path/to/install/compose.yaml \
+  exec bridge multica-bridge connection status
 ```
 
 ## Files, upgrades and isolation

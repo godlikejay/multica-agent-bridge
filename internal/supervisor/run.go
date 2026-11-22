@@ -37,6 +37,25 @@ func Serve(ctx context.Context, path string, testHTTP bool, log io.Writer) error
 	if err != nil {
 		return err
 	}
+	unlockState, err := lockDir(filepath.Join(containerDisk.runtime, ".connection-control"))
+	if err != nil {
+		return errors.New("cannot lock supervisor control state")
+	}
+	defer unlockState()
+	manager, err := newController(containerDisk.runtime, cfg)
+	if err != nil {
+		return err
+	}
+	listener, closeControl, err := listenControl(controlDir)
+	if err != nil {
+		return err
+	}
+	defer closeControl()
+	controlDone := make(chan struct{})
+	go func() {
+		defer close(controlDone)
+		manager.serveControl(ctx, listener)
+	}()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	logger := func(id, status string, wait time.Duration) {
@@ -52,11 +71,20 @@ func Serve(ctx context.Context, path string, testHTTP bool, log io.Writer) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			supervise(ctx, func() (time.Duration, string) {
-				return runConnection(ctx, containerDisk, c, testHTTP, logger)
-			}, func(status string, wait time.Duration) { logger(c.ID, status, wait) }, time.Second, 30*time.Second, time.Minute)
+			manager.run(ctx, c.ID, func(active context.Context, phase func(string)) {
+				supervise(active, func() (time.Duration, string) {
+					phase("starting")
+					return runConnection(active, containerDisk, c, testHTTP, logger, func() { phase("running") })
+				}, func(status string, wait time.Duration) {
+					phase("retrying")
+					logger(c.ID, status, wait)
+				}, time.Second, 30*time.Second, time.Minute)
+			})
 		}()
 	}
+	<-ctx.Done()
+	_ = listener.Close()
+	<-controlDone
 	wg.Wait()
 	return nil
 }
@@ -83,7 +111,7 @@ func supervise(ctx context.Context, attempt func() (time.Duration, string), log 
 	}
 }
 
-func runConnection(ctx context.Context, d disk, c Connection, testHTTP bool, log logFunc) (time.Duration, string) {
+func runConnection(ctx context.Context, d disk, c Connection, testHTTP bool, log logFunc, running func()) (time.Duration, string) {
 	for _, root := range []string{d.runtime, d.mailbox, filepath.Join(d.mailbox, "state")} {
 		if err := ensureDir(root); err != nil {
 			return 0, "persistence mount unavailable"
@@ -121,7 +149,7 @@ func runConnection(ctx context.Context, d disk, c Connection, testHTTP bool, log
 	}
 	started := time.Now()
 	log(c.ID, "starting Multica daemon", 0)
-	err = runCommand(ctx, env, nil, daemonStopTimeout, "--profile", c.ID, "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload")
+	err = runProcessTracked(ctx, daemonBinary, "/home/runtime", env, nil, daemonStopTimeout, running, "--profile", c.ID, "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload")
 	if err != nil {
 		return time.Since(started), "Multica daemon exited with an error"
 	}
@@ -204,6 +232,10 @@ func runCommand(ctx context.Context, env []string, stdin io.Reader, grace time.D
 }
 
 func runProcess(ctx context.Context, executable, dir string, env []string, stdin io.Reader, grace time.Duration, args ...string) error {
+	return runProcessTracked(ctx, executable, dir, env, stdin, grace, nil, args...)
+}
+
+func runProcessTracked(ctx context.Context, executable, dir string, env []string, stdin io.Reader, grace time.Duration, started func(), args ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -214,6 +246,9 @@ func runProcess(ctx context.Context, executable, dir string, env []string, stdin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	if started != nil {
+		started()
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
