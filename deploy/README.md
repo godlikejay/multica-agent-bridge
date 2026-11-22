@@ -145,6 +145,33 @@ docker compose --project-directory /path/to/install \
   exec bridge multica-bridge connection status
 ```
 
+### Set up the `mab` shortcut
+
+For a shortcut that works from any directory, save this as a user-owned
+file named `mab` in a directory already on your `PATH`, then run
+`chmod u+x /path/to/mab`. Use the absolute path to your existing install:
+
+```sh
+#!/bin/sh
+install_dir='/absolute/path/to/bridge-install'
+exec docker compose --project-directory "$install_dir" \
+  --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" \
+  exec -T bridge multica-bridge connection "$@"
+```
+
+Use the same options as the existing deployment, including any custom file
+names, additional Compose files, or project name (`-p`). Use different
+shortcut names for different installations.
+
+To have an agent do it, say: “Follow the MAB README and set up the `mab`
+shortcut for my existing Compose install at `/path/to/install`. Verify with
+`mab status` only.” On the Docker host, use the confirmed install and
+project, don't silently overwrite an existing command, and report the
+path written. Setup needs paths, not token values. Do not change Docker
+permissions, start or stop connections, or modify the deployment. The
+shortcut uses the operator's existing Docker access and is separate from
+the mailbox Skill.
+
 ## Files, upgrades and isolation
 
 | File or directory | Purpose | Optional path setting in `.env` |

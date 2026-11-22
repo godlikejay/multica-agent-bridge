@@ -103,6 +103,24 @@ docker compose --project-directory /path/to/install \
   exec bridge multica-bridge connection status
 ```
 
+<a id="shortcut-setup"></a>
+
+### 一次性配置 `mab` 短命令
+
+想在任意目录使用，把下面内容保存为 `mab`，放进已在 `PATH` 中的个人目录，再运行 `chmod u+x /path/to/mab`。把示例路径换成已有 Compose 安装的绝对路径：
+
+```sh
+#!/bin/sh
+install_dir='/absolute/path/to/bridge-install'
+exec docker compose --project-directory "$install_dir" \
+  --env-file "$install_dir/.env" -f "$install_dir/compose.yaml" \
+  exec -T bridge multica-bridge connection "$@"
+```
+
+如果部署时用了其他文件名、多份 Compose 文件，或用 `-p` 指定了项目名，脚本也要使用同样的参数。管理多套安装时，每套用不同的短命令名。
+
+也可以直接对 Docker 宿主机上的 Agent 说：「按 MAB README 给我在 `/实际安装路径` 的现有 Compose 配好 `mab`，只用 `mab status` 验证。」Agent 应确认安装和项目，不要直接覆盖已有同名命令，并告诉你写到了哪个文件。初始化只需要路径，不需要令牌内容；不改 Docker 权限、不启停连接、不改部署。这个短命令沿用你已有的 Docker 权限，不属于处理任务的 Skill。
+
 ## 挂载与升级
 
 默认配置是 `connections.json`，令牌在 `secrets/`，邮箱和运行状态在 `data/`。可以在 `.env` 用 `BRIDGE_CONFIG`、`BRIDGE_SECRETS_DIR`、`BRIDGE_DATA_DIR` 改位置；先在宿主机建好目录。如果要让 Agent 提交你明确授权的普通回复，只给它必要的邮箱读写权限，不要给它令牌或 daemon 登录目录的权限。[Agent 接入指南](../docs/zh-CN/agent-integration.md)说明如何一次配置路径和确认回复。

@@ -27,6 +27,21 @@ Python 3 (standard library only).
 
 Both options use the same Compose configuration for one or more connections.
 
+## Manage connections with a short command
+
+With an image that supports connection control, run this in the Compose
+directory to make `mab` available in your current shell:
+
+```sh
+mab() { docker compose exec -T bridge multica-bridge connection "$@"; }
+```
+
+Use `mab status`, `mab stop company`, or `mab start company`; replace
+`company` with the connection ID. Stopping can interrupt active Runs.
+For a shortcut that works from any directory, see the
+[one-time setup](deploy/README.md#set-up-the-mab-shortcut). You can ask a
+coding agent on the Docker host to do that setup for you.
+
 ## Use it from your coding agent
 
 Once the Bridge is online, [install the MAB Skill](docs/agent-integration.md#install-one-copy)

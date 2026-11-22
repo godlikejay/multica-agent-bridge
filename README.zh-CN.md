@@ -13,6 +13,16 @@ Multica 把已启动的任务交给 Bridge（MAB），Bridge 写进本地邮箱�
 
 两种方式都用同一份 Compose，可以配置一条或多条连接。
 
+## 用短命令启停连接
+
+镜像支持连接管理后，在 Compose 目录运行下面这行，就能在当前终端使用 `mab`：
+
+```sh
+mab() { docker compose exec -T bridge multica-bridge connection "$@"; }
+```
+
+可以用 `mab status`、`mab stop company`、`mab start company`。把 `company` 换成实际连接 ID。停止可能中断正在执行的 Run。想在任意目录使用，可以请 Docker 宿主机上的 Agent 按[一次性配置说明](deploy/README.zh-CN.md#shortcut-setup)帮你配好。
+
 ## 用自然语言操作 Multica
 
 Bridge 上线后，[给 Codex、agy 或 OMP 安装 MAB Skill](docs/zh-CN/agent-integration.md)，然后在项目里打开 Agent，第一次告诉它：
