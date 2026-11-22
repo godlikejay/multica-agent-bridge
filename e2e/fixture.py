@@ -28,13 +28,17 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
-def get(path, token=None, workspace_id=None):
+def get(path, token=None, workspace_id=None, require_complete=False):
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     if workspace_id:
         headers['X-Workspace-ID'] = workspace_id
     with OPENER.open(urllib.request.Request(API + path, headers=headers), timeout=5) as r:
+        if require_complete and (r.headers.get('X-Comments-Truncated', '').lower() == 'true'
+                                 or r.headers.get('X-Multica-Next-Before')
+                                 or r.headers.get('X-Multica-Next-Before-Id')):
+            raise ValueError('Incomplete comment evidence; use a fresh synthetic Issue')
         raw = r.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError('Oversized response')
@@ -201,6 +205,122 @@ def parallel(filename_a, filename_b, finish_a):
     print('REMOTE PARALLEL PASS: replied on A, B completed, and A stayed running after B.')
     print('Check both comments appear only on their intended Issues in the UI.')
 
+def local_comments(run):
+    for p in (MAIL / 'outbox').glob('*.json'):
+        if p.is_symlink() or not p.is_file() or p.stat().st_size > 256 * 1024:
+            continue
+        e = json.loads(p.read_text())
+        if e.get('kind') == 'comment' and all(e.get(k) == run[k] for k in ('issue_id', 'run_id', 'epoch')):
+            yield e
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit('FOLLOW-UP FAIL: ' + message)
+
+def follow_up(mode, workspace, filename_old, filename_new, filename_history, filename_trigger):
+    # Test actual application lifecycle on the isolated stack only. The human
+    # operates the UI; this command writes only two deterministic marked actions.
+    old, new, history = map(read_event, (filename_old, filename_new, filename_history))
+    observed = read_event(filename_trigger) if filename_trigger else None
+    require(old['kind'] == new['kind'] == 'task', 'provide two initial task events')
+    require(old['issue_id'] == new['issue_id'] and old['run_id'] != new['run_id']
+            and new['epoch'] == old['epoch'] + 1, 'expected consecutive Runs of one Issue')
+    require((mode == 'queue') == (observed is not None),
+            '--observed-trigger is required for queue only')
+    require(all(RUN_UUID.fullmatch(x) for x in (workspace, old['issue_id'], old['run_id'], new['run_id'])),
+            'expected canonical synthetic workspace, Issue and Run UUIDs')
+    for e in [history] + ([observed] if observed else []):
+        require(e['kind'] == 'comment' and all(e[k] == old[k] for k in ('issue_id', 'run_id', 'epoch'))
+                and RUN_UUID.fullmatch(e.get('source_id') or '') and not e.get('run_input'),
+                'expected an ordinary, already-observed comment on the old Run')
+    token = prompt_token()
+    issue = old['issue_id']
+    issue_path = '/api/issues/' + issue
+    runs = get(issue_path + '/task-runs', token, workspace)
+    require(isinstance(runs, list), 'unrecognized remote Run list')
+    a = [r for r in runs if r.get('id') == old['run_id']]
+    b = [r for r in runs if r.get('id') == new['run_id']]
+    require(len(a) == len(b) == 1, 'both exact Run IDs must exist on the remote Issue')
+    a, b = a[0], b[0]
+    require(all(r.get('issue_id') == issue and r.get('workspace_id') == workspace for r in (a, b))
+            and bool(a.get('agent_id')) and a['agent_id'] == b.get('agent_id'),
+            'remote workspace, Issue or Agent binding mismatch')
+    require(a.get('status') in ({'completed'} if mode == 'queue' else {'cancelled', 'canceled'})
+            and b.get('status') == 'running', 'expected old terminal Run and replacement running')
+    trigger = b.get('trigger_comment_id')
+    require(isinstance(trigger, str) and bool(RUN_UUID.fullmatch(trigger)) and trigger != history['source_id'],
+            'missing remote primary trigger, or ordinary history was used as trigger')
+    delivered = b.get('delivered_comment_ids')
+    require(isinstance(delivered, list) and all(isinstance(x, str) and RUN_UUID.fullmatch(x) for x in delivered)
+            and len(delivered) == len(set(delivered)) and trigger in delivered,
+            'new Run has no claim-time delivery receipt for its primary trigger')
+    require(not observed or observed['source_id'] == trigger,
+            'new remote trigger is not the queued comment observed on the old Run')
+    coalesced = b.get('coalesced_comment_ids', [])
+    require(isinstance(coalesced, list) and all(isinstance(x, str) and RUN_UUID.fullmatch(x) for x in coalesced)
+            and set(delivered) - {trigger} <= set(coalesced),
+            'nonprimary delivery lacks a coalesced role in the remote Run')
+    expected_roles = {source: 'trigger' if source == trigger else 'coalesced' for source in delivered}
+    require(history['source_id'] not in expected_roles, 'ordinary history was delivered as Run input')
+    if mode == 'queue':
+        require(len(delivered) >= 2, 'queue case requires at least two delivered inputs')
+        seen_before = {e.get('source_id') for e in local_comments(old)
+                       if not e.get('run_input') and any(m in e.get('body', '') for m in (MARKER, ESCAPED_MARKER))}
+        require(set(delivered) <= seen_before, 'a queued input was not observed as ordinary history on the old Run')
+
+    def comments():
+        rows = get(issue_path + '/comments?recent=200', token, workspace, require_complete=True)
+        require(isinstance(rows, list) and all(r.get('issue_id') == issue for r in rows),
+                'remote comment evidence is not scoped to this Issue')
+        return rows
+
+    matches = [r.get('id') for r in comments() if r.get('id') in expected_roles and not r.get('deleted_at')
+               and any(m in r.get('content', '') for m in (MARKER, ESCAPED_MARKER))]
+    require(len(matches) == len(expected_roles) and set(matches) == set(expected_roles),
+            'remote Run inputs are not the explicit synthetic comments')
+
+    def published_inputs():
+        roles = {}
+        for e in local_comments(new):
+            source, role = e.get('source_id'), e.get('run_input')
+            require(source != history['source_id'], 'ordinary observed history was re-emitted')
+            if not role:
+                require(source not in expected_roles, 'a delivered source was re-emitted without its Run input role')
+                continue
+            require(source not in roles and source in expected_roles and role == expected_roles[source],
+                    'unexpected, duplicate or mislabelled Run input')
+            roles[source] = e
+        return roles
+
+    # Allow the first replacement poll to publish all inputs after its task event.
+    for _ in range(20):
+        matched = published_inputs()
+        if set(matched) == set(expected_roles):
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit('FOLLOW-UP FAIL: not all delivered inputs were published for the replacement Run')
+    require(not observed or matched[trigger].get('id') != observed['id'],
+            'primary trigger did not get a new Run-bound event ID')
+
+    nonce = uuid.uuid4().hex
+    stale_body = MARKER + ': stale follow-up must never post ' + nonce
+    fresh_body = MARKER + ': verified replacement reply ' + nonce
+    receipt(submit(observed or old, 'reply', stale_body), 'stale', old)
+    require(not any(stale_body in r.get('content', '') for r in comments()), 'stale action posted remotely')
+    receipt(submit(matched[trigger], 'reply', fresh_body), 'reply_posted', new)
+    rows = comments()
+    require(not any(stale_body in r.get('content', '') for r in rows), 'stale action posted remotely')
+    posted = [r for r in rows if fresh_body in r.get('content', '') and not r.get('deleted_at')]
+    require(len(posted) == 1 and posted[0].get('source_task_id') == new['run_id']
+            and posted[0].get('parent_id') == trigger and posted[0].get('author_id') == b['agent_id']
+            and posted[0].get('author_type') == 'agent',
+            'replacement reply is missing, duplicated, or remotely misbound')
+    require(set(published_inputs()) == set(expected_roles), 'Run inputs changed during verification')
+    print('REMOTE + MAILBOX FOLLOW-UP PASS:', mode, issue, old['run_id'], new['run_id'], trigger,
+          'delivered inputs:', len(delivered))
+    print('UI menu selection and timing must be checked separately; replacement Run left active.')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -209,6 +329,9 @@ if __name__ == '__main__':
     f = sub.add_parser('fixture'); f.add_argument('event'); f.add_argument('--complete', action='store_true')
     sm = sub.add_parser('smoke'); sm.add_argument('event')
     pl = sub.add_parser('parallel'); pl.add_argument('event_a'); pl.add_argument('event_b'); pl.add_argument('--finish-a', action='store_true')
+    fo = sub.add_parser('follow-up'); fo.add_argument('mode', choices=('queue', 'restart'))
+    fo.add_argument('workspace'); fo.add_argument('old_task'); fo.add_argument('new_task')
+    fo.add_argument('old_history'); fo.add_argument('--observed-trigger')
     v = sub.add_parser('verify'); v.add_argument('run_id')
     args = parser.parse_args()
     try:
@@ -220,6 +343,8 @@ if __name__ == '__main__':
             fixture(args.event, True)
             verify(event['run_id'])
         elif args.cmd == 'parallel': parallel(args.event_a, args.event_b, args.finish_a)
+        elif args.cmd == 'follow-up':
+            follow_up(args.mode, args.workspace, args.old_task, args.new_task, args.old_history, args.observed_trigger)
         else: verify(args.run_id)
     except (ValueError, OSError, urllib.error.URLError) as exc:
         raise SystemExit(type(exc).__name__ + ': fixture failed (check local setup; no pass).') from None

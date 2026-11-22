@@ -116,4 +116,102 @@ class FixtureTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()): f.parallel(self.path, second, True)
         kinds = [json.loads(p.read_text())['kind'] for p in (self.root/'inbox/issue-1').glob('*.json')]
         self.assertCountEqual(kinds, ['reply', 'complete'])
+
+    def follow_up_fixture(self, mode, *, delivered=True, repeat_history=False, stale_posts=False,
+                          first_seen=True, multiple=True, wrong_role=False, unexpected=False,
+                          duplicate=False, missing=False):
+        def uid(n):
+            return '00000000-0000-0000-0000-' + str(n).zfill(12)
+
+        workspace, issue, agent, trigger, history, first = map(uid, range(10, 16))
+        a = dict(self.event, issue_id=issue, run_id=uid(1))
+        b = dict(a, id='event-2', run_id=uid(2), epoch=a['epoch'] + 1)
+
+        def put(e):
+            path = self.root / 'outbox' / (e['id'] + '.json')
+            path.write_text(json.dumps(e))
+            return path
+
+        task_a, task_b = put(a), put(b)
+        hist_a = put(dict(a, kind='comment', id='history-a', source_id=history))
+        trigger_a = put(dict(a, kind='comment', id='trigger-a', source_id=trigger)) if mode == 'queue' else None
+        put(dict(b, kind='comment', id='trigger-b', source_id=trigger, run_input='trigger'))
+        has_first = mode == 'queue' and multiple
+        if has_first and first_seen:
+            put(dict(a, kind='comment', id='first-a', source_id=first))
+        if has_first and not missing:
+            put(dict(b, kind='comment', id='first-b', source_id=first,
+                     run_input='trigger' if wrong_role else 'coalesced'))
+        if unexpected:
+            put(dict(b, kind='comment', id='unexpected-b', source_id=uid(19), run_input='coalesced'))
+        if duplicate:
+            put(dict(b, kind='comment', id='duplicate-b', source_id=trigger, run_input='trigger'))
+        if repeat_history:
+            put(dict(b, kind='comment', id='history-b', source_id=history))
+        runs = [dict(id=a['run_id'], issue_id=issue, workspace_id=workspace, agent_id=agent,
+                     status='completed' if mode == 'queue' else 'cancelled'),
+                dict(id=b['run_id'], issue_id=issue, workspace_id=workspace, agent_id=agent,
+                     status='running', trigger_comment_id=trigger,
+                     coalesced_comment_ids=[first] if has_first else [],
+                     delivered_comment_ids=([first, trigger] if has_first else [trigger]) if delivered else [])]
+
+        def fake_get(path, token, header_workspace, require_complete=False):
+            self.assertEqual(token, 'synthetic')
+            self.assertEqual(header_workspace, workspace)
+            if path == '/api/issues/' + issue + '/task-runs':
+                return runs
+            self.assertEqual(path, '/api/issues/' + issue + '/comments?recent=200')
+            self.assertTrue(require_complete)
+            rows = [dict(id=trigger, issue_id=issue, content=f.MARKER + ': trigger')]
+            if has_first:
+                rows.append(dict(id=first, issue_id=issue, content=f.MARKER + ': first queued'))
+            for req in (self.root / 'inbox' / issue).glob('*.json'):
+                event = json.loads(req.read_text())
+                if event['run_id'] == b['run_id'] or stale_posts:
+                    rows.append(dict(issue_id=issue, content=event['body'], author_id=agent,
+                                     author_type='agent', parent_id=event.get('parent_id'),
+                                     source_task_id=event['run_id']))
+            return rows
+
+        return (mode, workspace, task_a, task_b, hist_a, trigger_a), fake_get, a, b
+
+    def test_follow_up_verifies_both_routes_and_bound_receipts(self):
+        for mode in ('queue', 'restart'):
+            with self.subTest(mode=mode):
+                args, remote, a, b = self.follow_up_fixture(mode)
+                with patch.object(f, 'prompt_token', return_value='synthetic'), patch.object(f, 'get', side_effect=remote), patch.object(f, 'receipt') as receipt:
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        f.follow_up(*args)
+                self.assertIn('REMOTE + MAILBOX FOLLOW-UP PASS: ' + mode, out.getvalue())
+                self.assertEqual([c.args[1:] for c in receipt.call_args_list], [('stale', a), ('reply_posted', b)])
+                for req in (self.root / 'inbox' / a['issue_id']).glob('*.json'):
+                    req.unlink()
+                for event in (self.root / 'outbox').glob('*.json'):
+                    event.unlink()
+
+    def test_follow_up_rejects_missing_delivery_and_repeated_history_before_write(self):
+        for kwargs, expected in ((dict(delivered=False), 'claim-time delivery'),
+                                 (dict(repeat_history=True), 'ordinary observed history'),
+                                 (dict(multiple=False), 'at least two'),
+                                 (dict(first_seen=False), 'not observed'),
+                                 (dict(wrong_role=True), 'mislabelled'),
+                                 (dict(unexpected=True), 'unexpected'),
+                                 (dict(duplicate=True), 'duplicate'),
+                                 (dict(missing=True), 'not all delivered inputs')):
+            args, remote, _, _ = self.follow_up_fixture('queue', **kwargs)
+            with patch.object(f, 'time') as timer, patch.object(f, 'prompt_token', return_value='synthetic'), patch.object(f, 'get', side_effect=remote):
+                with self.assertRaisesRegex(SystemExit, expected):
+                    f.follow_up(*args)
+            self.assertEqual(list((self.root / 'inbox').iterdir()), [])
+            if kwargs.get('missing'):
+                self.assertEqual(timer.sleep.call_count, 20)
+            for event in (self.root / 'outbox').glob('*.json'):
+                event.unlink()
+
+    def test_follow_up_fails_if_stale_request_posted_remotely(self):
+        args, remote, a, _ = self.follow_up_fixture('queue', stale_posts=True)
+        with patch.object(f, 'prompt_token', return_value='synthetic'), patch.object(f, 'get', side_effect=remote), patch.object(f, 'receipt') as receipt:
+            with self.assertRaisesRegex(SystemExit, 'stale action posted remotely'):
+                f.follow_up(*args)
+        self.assertEqual([c.args[1:] for c in receipt.call_args_list], [('stale', a)])
 if __name__ == '__main__': unittest.main()

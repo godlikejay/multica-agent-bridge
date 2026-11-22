@@ -45,6 +45,9 @@ case "${1:-help}" in
     compose --profile runtime run --rm --entrypoint multica-bridge runtime acp --version ;;
   restart) need_docker; compose --profile runtime restart runtime ;;
   health) python3 fixture.py health ;;
+  follow-up)
+    shift
+    python3 -B fixture.py follow-up "$@" ;;
   smoke)
     event=${2:-${E2E_TASK:-}}
     [ -n "$event" ] || { echo 'Set E2E_TASK to the synthetic Run task event in e2e/.local/bridge/outbox. Complete manual bootstrap/assignment first.' >&2; exit 2; }
@@ -67,5 +70,6 @@ case "${1:-help}" in
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; test state retained. No volumes/files deleted.' ;;
-  *) echo 'Usage: ./e2e/run.sh init|up|urls|versions|login|workspaces|workspace UUID|runtime|status|restart|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
+  *) echo 'Usage: ./e2e/run.sh init|up|urls|versions|login|workspaces|workspace UUID|runtime|status|restart|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down'
+     echo '       ./e2e/run.sh follow-up (queue|restart) WORKSPACE_UUID OLD_TASK NEW_TASK OLD_HISTORY [--observed-trigger OLD_COMMENT]' ;;
 esac

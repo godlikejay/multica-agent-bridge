@@ -292,7 +292,81 @@ Runtime and Daemon) and runtime online status. If it is
 real directories and look for any pending approval before adjusting caps.
 None of these states is a parallel pass.
 
-### Restart / dedupe / failures (separate synthetic Runs)
+### UI follow-ups: queue versus stop and restart
+
+Use two fresh marked Issues in the **local synthetic** workspace, one for
+each mode. Start an initial Run on each by addressing the synthetic Agent in
+a marked comment, then reply in that comment thread. Use a Todo Issue and
+the same synthetic Agent. Run the cases sequentially; finish or cancel any
+test Runs before starting the next case. Record the release image digests
+and checkout SHA from the setup above.
+
+For **both** cases, record the old `kind:task` file and verify its exact Run
+is `running` in Multica. While it is running, create a distinct comment such as
+`E2E_SYNTHETIC_ONLY: HISTORY-QUEUE` or `HISTORY-RESTART` (include the marker in
+both). Choose **Don't start this time** (`skip`) for the synthetic Agent. Wait
+for that comment's event on the old Run and record its path as `OLD_HISTORY`.
+It must be ordinary history, not a trigger. If the UI offer or status differs,
+record the actual text and stop that test instead of using an alternate route.
+
+**Queue.** In the same thread, send two comments sequentially to the same
+Agent: `E2E_SYNTHETIC_ONLY: FOLLOWUP-QUEUE-1` and
+`E2E_SYNTHETIC_ONLY: FOLLOWUP-QUEUE-2`. Pick **Start after current run**
+(`after_run`; 本轮结束后开始) for both. Do not complete the old Run yet.
+Confirm it stays running and the follow-up has not started. Wait for both
+comments to appear as separate ordinary `kind:comment` events on the old
+Run. Keep both immutable files and set `OLD_TRIGGER` to the second event's
+path. Complete the old Run explicitly and verify remote completion:
+
+```sh
+./e2e/run.sh fixture "$OLD_TASK" --complete
+./e2e/run.sh verify "$OLD_RUN_UUID"
+```
+
+Wait for a new `kind:task` on the same Issue, bound to the replacement Run
+shown by Multica. Save its path as `NEW_TASK`. From repository root, use
+**absolute** event paths in these commands:
+
+```sh
+./e2e/run.sh follow-up queue "$WORKSPACE_UUID" "$OLD_TASK" "$NEW_TASK" \
+  "$OLD_HISTORY" --observed-trigger "$OLD_TRIGGER"
+```
+
+**Stop and restart.** Start a fresh isolated Issue and previous Run for this
+case; leave no other queued input for that Issue. Send a new comment
+`E2E_SYNTHETIC_ONLY: FOLLOWUP-RESTART` to the same Agent and choose
+**Stop and start over** (`restart`; 停止并重新开始), then **Stop and send**.
+Confirm the old Run shows cancelled and the newly posted comment starts a
+different Run. Do not complete the old Run from the mailbox. The restart
+comment is created after cancellation, so it need not be present on the old
+Run. Do not infer what would happen to other queued comments.
+
+```sh
+./e2e/run.sh follow-up restart "$WORKSPACE_UUID" "$OLD_TASK" "$NEW_TASK" "$OLD_HISTORY"
+```
+
+The verifier requires the exact synthetic Workspace, Issue, Agent, distinct
+consecutive Run/epoch, and expected old/new remote statuses. It checks the
+complete claim-time `delivered_comment_ids` set against the replacement
+mailbox: exactly one `run_input: "trigger"` event for the reported primary
+trigger and one `run_input: "coalesced"` event for each remaining delivered
+source. Missing, extra, duplicate or mislabelled events fail, as does
+re-emission of ordinary history. The queue case requires at least two
+delivered comments, all already observed on the old Run, with the newest
+selected comment as the primary trigger. Restart uses the same comparison
+without the queue case's count and prior observation requirements.
+The verifier then writes one deliberately stale request and one fresh
+reply, requiring `stale`/no remote post for the former and `reply_posted`/one
+correctly parented remote comment from the replacement Run for the latter.
+It prompts for the same **synthetic** PAT and does not retain it. The
+replacement remains active, so finish or cancel it explicitly after review.
+
+Record the UI selection and before/after ordering separately from each
+`REMOTE + MAILBOX FOLLOW-UP PASS` line. A manual UI check alone, a local event
+alone, or offline fixture tests are not a full pass. A failed or timed-out
+check is not permission to resend or restart automatically.
+
+### Restart / dedupe / failures (other synthetic Runs)
 
 - After a successful reply, restart it with `./e2e/run.sh restart`.
   Leave the same immutable request file in inbox. Check it is not posted twice.
