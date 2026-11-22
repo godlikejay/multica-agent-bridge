@@ -359,21 +359,25 @@ class MailboxCLI(unittest.TestCase):
             (directory / name).write_text(json.dumps(event))
         return ("--connection", connection, "--workspace", workspace), directory
 
-    def project_tool(self, name, fake_path=None):
+    def project_tool(self, name, fake_path=None, shared=False):
         script = self.root / name / "scripts" / "mailbox.py"
         script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        def invoke(*args, success=True, root=None):
+        (self.root / name / ".git").write_text("gitdir: synthetic\n")
+        if shared:
+            script.symlink_to(SCRIPT)
+        else:
+            shutil.copyfile(SCRIPT, script)
+        def invoke(*args, success=True, root=None, cwd=None, raw=False):
             env = {k: v for k, v in os.environ.items() if k != "BRIDGE_ROOT"}
             if root is not None:
                 env["BRIDGE_ROOT"] = str(root)
             if fake_path is not None:
                 env["PATH"] = str(fake_path) + os.pathsep + os.defpath
             result = subprocess.run([sys.executable, "-B", str(script), *map(str, args)],
-                                    env=env, cwd=self.root, capture_output=True,
+                                    env=env, cwd=cwd or self.root / name, capture_output=True,
                                     start_new_session=True, timeout=8)
             self.assertEqual(result.returncode == 0, success, result.stderr)
-            return json.loads(result.stdout) if success else result.stderr.decode()
+            return (result.stdout if raw else json.loads(result.stdout)) if success else result.stderr.decode()
         return invoke
 
     def test_setup_resolves_slugs_per_connection_without_first_task(self):
@@ -433,7 +437,7 @@ print(json.dumps(rows[connection]))
         project = self.project_tool("monorepo")
         result = project("setup", self.root, "--route", f"cloud:{LINE_A}", "--route", f"cloud:{LINE_B}",
                          "--route", f"cloud:{LINE_EMPTY}")
-        config_path = self.root / "monorepo" / "mailbox.local.json"
+        config_path = self.root / "monorepo" / ".local" / "mab.json"
         self.assertEqual(Path(result["config_path"]), config_path.resolve())
         self.assertEqual(json.loads(config_path.read_text()), {"root": str(self.root), "routes": result["routes"]})
         rows = project("list", "--unread", "--issue-id", "issue-1")
@@ -454,6 +458,78 @@ print(json.dumps(rows[connection]))
         self.assertIn("invalid mailbox ID", project("setup", self.root, "--route",
                                                    "cloud:..", success=False))
         self.assertEqual(len(project("list")), 4)
+
+    def test_shared_skill_uses_checkout_config_from_nested_directory(self):
+        self.scoped_fixture("cloud", LINE_A)
+        self.scoped_fixture("cloud", LINE_B)
+        for project, workspace in (("worktree-a", LINE_A), ("worktree-b", LINE_B)):
+            helper = self.project_tool(project, shared=True)
+            checkout = self.root / project
+            nested = checkout / "src"
+            nested.mkdir()
+            result = helper("setup", self.root, "--route", f"cloud:{workspace}", cwd=nested)
+            self.assertEqual(Path(result["config_path"]), (checkout / ".local" / "mab.json").resolve())
+            self.assertEqual(helper("read", "task-1", cwd=nested)["workspace_id"], workspace)
+            self.assertEqual(helper("--project", checkout, "tasks", cwd=self.root)["tasks"][0]["issue"], "FIX-1")
+
+    def test_compact_flow_pins_run_and_has_bounded_default_output(self):
+        _, a = self.scoped_fixture("cloud", LINE_A)
+        _, b = self.scoped_fixture("cloud", LINE_B)
+        for directory, fixture in ((a, "alpha"), (b, "beta")):
+            for file in directory.glob("*.json"):
+                e = json.loads(file.read_text())
+                e["id"] = fixture + "-" + e["id"]
+                if e["kind"] == "task":
+                    e["body"] = "测试标题\n\n" + "描述" * 3000
+                (directory / (e["id"] + ".json")).write_text(json.dumps(e))
+                file.unlink()
+        helper = self.project_tool("compact")
+        helper("setup", self.root, "--route", f"cloud:{LINE_A}", "--route", f"cloud:{LINE_B}")
+        self.assertIn("ambiguous", helper("show", "FIX-1", success=False))
+        cards = helper("tasks")["tasks"]
+        self.assertEqual({card["target"] for card in cards}, {"alpha-task-1", "beta-task-1"})
+        short = helper("show", "alpha-task-1", raw=True)
+        full = helper("show", "alpha-task-1", "--full", raw=True)
+        verbose = helper("--verbose", "show", "alpha-task-1", raw=True)
+        self.assertIn("测试标题".encode(), short)
+        self.assertLess(len(short) * 2, len(full))
+        self.assertLess(len(full), len(verbose))
+        report = json.loads(short)
+        self.assertTrue(report["truncated"])
+        self.assertNotIn("run_id", report)
+        target = report["comments"][0]["target"]
+        self.assertEqual(target, "alpha-comment-1")
+        self.assertIn("not found", helper("reply", "FIX-1", "No guessing", success=False))
+        new = json.loads((a / "alpha-task-1.json").read_text())
+        new.update(id="alpha-task-2", run_id="run-2", epoch=2)
+        (a / "alpha-task-2.json").write_text(json.dumps(new))
+        self.assertIn("stale", helper("reply", target, "不能写给新一轮", success=False))
+        submitted = helper("complete", "alpha-task-2", "完成")
+        self.assertEqual(submitted["status"], "pending")
+        rid = submitted["request"]
+        files = list(self.inbox.rglob("*.json"))
+        self.assertEqual(len(files), 1)
+        request = json.loads(files[0].read_text())
+        self.assertEqual((request["workspace_id"], request["run_id"], request["kind"], request["body"]),
+                         (LINE_A, "run-2", "complete", "完成"))
+        event = dict(new, id="finished", kind="receipt", request_id=rid, status="completion_requested")
+        (a / "finished.json").write_text(json.dumps(event))
+        self.assertEqual(helper("result", rid), {"status": "completion_requested"})
+        self.assertIn("receipts", helper("--verbose", "result", rid))
+
+    def test_quick_receipt_uses_bridge_event_ids_and_binding(self):
+        request = dict(issue_id="issue-1", run_id="run-1", epoch=1, id="request-1")
+        rid = cli.hashlib.sha256(b"receipt\0issue-1\0request-1").hexdigest()
+        self.event(rid, "receipt", request_id=request["id"], status="reply_posted")
+        fd = os.open(self.outbox, cli.DIR_FLAGS)
+        try:
+            box = cli.Outbox(fd, ())
+            recv = cli.action_receipts(box, request)
+            self.assertEqual(cli.compact_result(recv), {"status": "reply_posted"})
+            with self.assertRaisesRegex(cli.MailboxError, "unexpected receipt"):
+                cli.action_receipts(box, {**request, "epoch": 2})
+        finally:
+            os.close(fd)
 
     def test_root_override_does_not_inherit_routes(self):
         self.scoped_fixture("cloud", LINE_A)

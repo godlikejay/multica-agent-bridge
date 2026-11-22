@@ -34,7 +34,7 @@ curl -fsSLo "$skill/scripts/mailbox.py" "$src/scripts/mailbox.py"
 ```sh
 python3 "$skill/scripts/mailbox.py" setup /absolute/path/to/install/data \
   --route cloud:engineering --route cloud:operations
-python3 "$skill/scripts/mailbox.py" list --unread
+python3 "$skill/scripts/mailbox.py" tasks
 ```
 
 使用 slug 时，工具会在正在运行的 Compose Bridge 里，用该连接已登录的 Multica CLI
@@ -42,18 +42,33 @@ python3 "$skill/scripts/mailbox.py" list --unread
 就不修改已有配置。默认在邮箱 `data/` 的父目录找 Compose 安装；若是单独挂载，
 给 `setup` 加上 `--install-dir /absolute/path/to/compose/install`。
 如果不在 Bridge 宿主机上，或不能访问正在运行的 Compose，可以直接写
-`--route CONNECTION:WORKSPACE_UUID`，无需查询。日常读任务、回复的命令不变，也不依赖 Docker。
+`--route CONNECTION:WORKSPACE_UUID`，无需查询。日常读任务、回复不依赖 Docker。
 
-不同项目使用不同范围时，各装一份项目级 Skill。路径和所有连接、工作区配对保存在已安装的 `SKILL.md` 旁边的 `mailbox.local.json`；把该文件加入 Git 忽略规则，不要写入令牌。路径或范围变了，就带完整列表重新运行 `setup`。
+从项目里运行 `setup`。它会在最近的 Git 工作树根目录保存 `.local/mab.json`；不在 Git 工作树里时，就保存到当前目录。配置按项目区分，多个项目可以共用同一份 Skill，包括软链接安装。把 `/.local/mab.json` 加入项目的 Git 忽略规则，不要写入令牌。邮箱路径或范围变了，带完整列表重新运行 `setup`。如果从其他目录操作，在子命令前加 `--project /absolute/path/to/project`。
 
 不传 `--route` 时只保存路径；可用 `scopes` 查看该邮箱已出现的连接和工作区，再保存配对或在命令中手动指定。`scopes` 用于发现和排查，不必每天运行。路径优先级是 `--root`、项目保存的路径、`BRIDGE_ROOT`。切到另一个邮箱，不会沿用原配置的配对；仍用原邮箱时，显式指定的配对也必须在本项目已配置的范围内。
 
 ## 收任务和回复
 
-`list` 和 `list --unread` 默认查看本项目配置的所有工作区。列表每条记录都带 `connection_id` 和 `workspace_id`。只配置一组时，读取、拟稿、提交等可以省略这两个参数；配置多组时，直接取选中任务记录上的两个值，在子命令前传入 `--connection ID --workspace UUID`，同一任务后续一直用这组值。
+日常直接说「看下 Multica 任务」「读一下 OPS-123 的最新要求」即可。Agent 按项目保存的范围查找，无需你重复填工作区 ID；同一个任务编号在多个工作区重名时，不会擅自选一个。
 
-- **收任务**：Agent 用 `list` 和 `read` 读取任务。Issue 或评论里的文字不等于你的授权。
-- **发普通回复**：你明确允许向这条任务发送该回复后，Agent 可以在同一连接和工作区运行 `submit DRAFT.json --yes`。这只跳过终端确认，仍会核对任务、Run 和其他绑定。你自己也可以运行 `submit DRAFT.json`，核对目标和文字后在终端确认。
-- **结束 Run**：你明确让 Agent 结束当前 Run 时，它可以直接提交完成请求并查回执。把旧草稿改绑到新 Run 仍须手动确认。发送状态不明时先回 Multica 核实，不要直接重发。
+如果想自己在终端操作：
 
-给 Agent 邮箱读取权限，需要它发送普通回复时才给 Inbox 写权限。不要给它 daemon 登录目录、令牌或 Bridge 私有状态。若要强制人工提交，就让 Agent 不能写 Inbox，由另一个身份提交；Skill 本身不是权限隔离。
+```sh
+tool=.agents/skills/multica-bridge/scripts/mailbox.py
+python3 "$tool" tasks
+python3 "$tool" tasks OPS-123
+python3 "$tool" show OPS-123
+# 写操作使用 show 返回的确切 target，不用任务编号。
+python3 "$tool" reply TARGET '修复已提交，明天验证。'
+# 如果要结束这一轮，用 complete 代替 reply。
+python3 "$tool" complete TARGET '修复已完成，检查通过。'
+# 仅当回执尚未返回时，用命令返回的请求 ID 查询。
+python3 "$tool" result REQUEST_ID
+```
+
+`tasks` 每个 Issue 只展示 MAB 最近收到的 Run，不是 Multica 的完整队列，也不代表 Run 仍在执行。`show` 查看一条任务或指定事件；回复某条评论时，使用该评论的 target。新 Run 交给 MAB 后才会出现在本地，旧 Run 的回复或草稿不会自动改绑。
+
+`reply` 和 `complete` 会直接提交，只有明确授权才使用。两者都会校验对应事件和 Run；要先拟稿或在终端核对，仍可用 `draft`、`submit`。旧草稿改绑必须手动确认。发送状态不明时查原 Issue 或等待核对，不要直接重发。收到完成请求的回执不代表远端已结束；结束 Run 也不会关闭 Issue。
+
+只给 Agent 必要的邮箱读取权限，需要它提交已授权动作时才给 Inbox 写权限。不要给它 daemon 登录目录、令牌或 Bridge 私有状态。若要强制人工提交，就让 Agent 不能写 Inbox，由另一个身份提交；Skill 本身不是权限隔离。

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Local Multica mailbox utility; setup can resolve slugs via an existing Bridge."""
+"""Local Multica mailbox utility; setup can resolve slugs via an existing Bridge.
+
+The agent-facing commands emit bounded UTF-8 JSON. Use --verbose before a
+subcommand for event bindings and diagnostics; the lower-level commands
+retain their explicit scope selectors and draft/submit interface.
+"""
 
 import argparse
+from collections import Counter
 import fcntl
 import hashlib
 import heapq
@@ -13,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import uuid
 from typing import NamedTuple
@@ -30,7 +37,7 @@ KINDS = {"reply", "complete"}
 TERMINAL = {"completion_requested"}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-LOCAL_CONFIG = Path(__file__).resolve().parent.parent / "mailbox.local.json"
+COMPACT_COMMANDS = {"tasks", "show", "reply", "complete", "result"}
 
 
 class MailboxError(Exception):
@@ -150,10 +157,15 @@ def bounded_body(text):
 
 
 def draft(outbox, event_id, kind, body_file):
+    body = file_bytes(body_file, MAX_BODY).decode("utf-8")
+    return build_draft(outbox, event_id, kind, body)
+
+
+def build_draft(outbox, event_id, kind, body):
     e = load_event(outbox, event_id)
     if e["kind"] not in {"task", "comment"}:
         raise MailboxError("draft must name a task or comment event")
-    body = bounded_body(file_bytes(body_file, MAX_BODY).decode("utf-8"))
+    body = bounded_body(body)
     return {"event_id": event_id, "request": {
         "version": 1, "id": uuid.uuid4().hex, "kind": kind, "body": body,
         **dict(zip(BINDING, bind(e))), **scope_fields(outbox.scope), **parent_fields(e, kind),
@@ -584,14 +596,26 @@ def resolve_setup_routes(root, install_dir, values):
     return pairs
 
 
-def load_local_config():
+def project_config(explicit=None):
+    cwd = Path.cwd()
+    root = (Path(check_root(explicit)).resolve(strict=True) if explicit
+            else next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), cwd))
+    if not root.is_dir():
+        raise MailboxError("project path must be a directory")
+    directory = root / ".local"
+    if directory.is_symlink():
+        raise MailboxError("project .local must not be a symlink")
+    return directory / "mab.json"
+
+
+def load_local_config(path):
     try:
-        config = json_file(LOCAL_CONFIG)
+        config = json_file(path)
     except FileNotFoundError:
         return None, ()
     routes = config.get("routes")
     if set(config) != {"root", "routes"} or not isinstance(routes, list):
-        raise MailboxError("invalid mailbox.local.json; run setup again")
+        raise MailboxError("invalid .local/mab.json; run setup again")
     pairs = []
     for entry in routes:
         if not isinstance(entry, dict) or set(entry) != set(SCOPE_FIELDS):
@@ -600,7 +624,7 @@ def load_local_config():
     return check_root(config["root"]), tuple(dict.fromkeys(pairs))
 
 
-def save_local_config(root, install_dir, values):
+def save_local_config(path, root, install_dir, values):
     root = check_root(root)
     fd = os.open(root, DIR_FLAGS)
     try:
@@ -610,17 +634,18 @@ def save_local_config(root, install_dir, values):
         os.close(fd)
     routes = resolve_setup_routes(root, install_dir, values)
     config = {"root": root, "routes": [scope_fields(pair) for pair in dict.fromkeys(routes)]}
-    fd, staged = tempfile.mkstemp(prefix=".mailbox-config-", dir=LOCAL_CONFIG.parent)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix=".mailbox-config-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(staged, LOCAL_CONFIG)
+        os.replace(staged, path)
     finally:
         Path(staged).unlink(missing_ok=True)
-    emit({"status": "configured", "config_path": str(LOCAL_CONFIG), **config})
+    emit({"status": "configured", "config_path": str(path), **config})
 
 
 def list_events(root_fd, routes, args):
@@ -662,16 +687,233 @@ def list_events(root_fd, routes, args):
     emit([metadata(e) for _, _, e in newest])
 
 
+def submit_item(root_fd, outbox, item, yes, rebind=None, original=None):
+    request = resolve_request(outbox, item)
+    scope = outbox.scope
+    inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
+    try:
+        shelf = issue_inbox(inbox, request["issue_id"], create=True)
+        try:
+            validate(outbox, shelf, request)
+            if rebind:
+                validate_rebind_source(outbox, shelf, original)
+            if not yes and not confirm(request, item["event_id"], original["request"] if rebind else None):
+                raise MailboxError("submission cancelled; no request was written")
+            verified = issue_inbox(inbox, request["issue_id"])
+            try:
+                # Serialize the final check and publish across CLI writers,
+                # without holding the lock while an operator reviews a draft.
+                fcntl.flock(verified, fcntl.LOCK_EX)
+                verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
+                verify_scope_directory(root_fd, "inbox", scope, inbox)
+                if not os.path.samestat(os.fstat(shelf), os.fstat(verified)):
+                    raise MailboxError("issue inbox changed during confirmation")
+                resolve_request(outbox, item)
+                if rebind and rebind_draft(outbox, original, rebind) != item:
+                    raise MailboxError("rebind target changed during confirmation")
+                validate(outbox, verified, request)
+                if rebind:
+                    validate_rebind_source(outbox, verified, original)
+                publish(verified, request)
+            finally:
+                os.close(verified)
+        finally:
+            os.close(shelf)
+        return request
+    finally:
+        os.close(inbox)
+
+
+def compact_emit(obj):
+    view = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    print("".join(json.dumps(c, ensure_ascii=True)[1:-1]
+                  if unicodedata.category(c).startswith("C") or unicodedata.category(c) in {"Zl", "Zp"}
+                  else c for c in view))
+
+
+def project_events(root_fd, routes):
+    for scope in routes:
+        directory = scoped_dir(root_fd, "outbox", scope, optional=True)
+        if directory is not None:
+            try:
+                for when, event in events(Outbox(directory, scope)):
+                    yield when, scope, event
+            finally:
+                os.close(directory)
+
+
+def latest_tasks(rows, selector=None):
+    latest = {}
+    for when, scope, event in rows:
+        if event["kind"] != "task":
+            continue
+        if selector is not None and selector not in (event["issue_id"], event.get("issue_key")):
+            continue
+        key = scope, event["issue_id"]
+        rank = event["epoch"], when, event["id"]
+        if key not in latest or rank > latest[key][0]:
+            latest[key] = rank, (when, scope, event)
+    return sorted((row for _, row in latest.values()), key=lambda row: (row[0], row[2]["id"]), reverse=True)
+
+
+def unique_row(rows):
+    if not rows:
+        raise MailboxError("not found in this project's mailbox")
+    if len(rows) != 1:
+        raise MailboxError("ambiguous across project routes; use the exact target from tasks")
+    return rows[0]
+
+
+def compact_body(event, limit):
+    body = event.get("body", "")
+    if not isinstance(body, str):
+        raise MailboxError("invalid event body")
+    return {"text": body[:limit], **({"truncated": True} if len(body) > limit else {})}
+
+
+def compact_result(receipts, request_id=None, verbose=False):
+    if not receipts:
+        return {"status": "pending", **({"request": request_id} if request_id else {})}
+    # Reconciliation is positive evidence of a post, not of Run completion.
+    receipt = next((e for e in receipts if e.get("status") == "delivery_confirmed"), receipts[0])
+    if verbose:
+        return {"receipts": receipts}
+    if receipt.get("status") == "delivery_uncertain" and request_id:
+        return {"status": "delivery_uncertain", "request": request_id}
+    return {"status": receipt["status"]}
+
+
+def action_receipts(outbox, request):
+    # Match the Go Bridge's immutable receipt names, avoiding repeated
+    # scans of the whole Outbox while waiting for a single local action.
+    issue, run, rid = request["issue_id"], request["run_id"], request["id"]
+    receipts = []
+    for parts in (("receipt", issue, rid), ("reconciliation", issue, run, rid)):
+        event_id = hashlib.sha256("\0".join(parts).encode()).hexdigest()
+        try:
+            event = load_event(outbox, event_id)
+        except FileNotFoundError:
+            continue
+        if (event["kind"] != "receipt" or bind(event) != bind(request)
+                or event.get("request_id") != rid or not isinstance(event.get("status"), str)):
+            raise MailboxError("unexpected receipt for submitted request")
+        receipts.append(metadata(event))
+    return receipts
+
+
+def compact_command(root_fd, routes, args):
+    cmd = args.command
+    if cmd in {"reply", "complete", "result"}:
+        target = require_id(args.target)
+    if cmd == "result":
+        rows = [(scope, event) for _, scope, event in project_events(root_fd, routes)
+                if event["kind"] == "receipt" and event.get("request_id") == target and isinstance(event.get("status"), str)]
+        if len({(scope, bind(event)) for scope, event in rows}) > 1:
+            raise MailboxError("request ID is ambiguous across runs")
+        compact_emit(compact_result([e for _, e in rows], target, args.verbose))
+        return
+    if cmd in {"reply", "complete"}:
+        candidates = []
+        for route in routes:
+            directory = scoped_dir(root_fd, "outbox", route, optional=True)
+            if directory is None:
+                continue
+            try:
+                event = load_event(Outbox(directory, route), target)
+            except FileNotFoundError:
+                continue
+            finally:
+                os.close(directory)
+            if event["kind"] in UNREAD_KINDS:
+                candidates.append((0, route, event))
+        _, scope, _ = unique_row(candidates)
+        if not scope:
+            raise MailboxError("configure a project route before sending")
+        outbox_fd = scoped_dir(root_fd, "outbox", scope)
+        outbox = Outbox(outbox_fd, scope)
+        try:
+            request = submit_item(root_fd, outbox, build_draft(outbox, target, cmd, args.text), yes=True)
+            deadline = time.monotonic() + 2.0
+            while True:
+                receipts = action_receipts(outbox, request)
+                if receipts or time.monotonic() >= deadline:
+                    compact_emit(compact_result(receipts, request["id"], args.verbose))
+                    return
+                time.sleep(0.2)
+        finally:
+            os.close(outbox_fd)
+
+    rows = list(project_events(root_fd, routes))
+    if cmd == "tasks":
+        latest = latest_tasks(rows, args.issue)
+        limit = MAX_LIST if args.verbose else 8
+        cards = []
+        names = Counter(event.get("issue_key") or event["issue_id"] for _, _, event in latest)
+        finished = {(route, bind(event)) for _, route, event in rows
+                    if event["kind"] == "receipt" and event.get("status") == "completion_requested"}
+        for _, route, event in latest[:limit]:
+            if args.verbose:
+                cards.append({**metadata(event), **compact_body(event, MAX_READ_BODY)})
+                continue
+            title = compact_body(event, 120)["text"].split("\n", 1)[0]
+            card = {"issue": event.get("issue_key") or event["issue_id"], "title": title}
+            if names[card["issue"]] > 1:
+                card["target"] = event["id"]
+            if (route, bind(event)) in finished:
+                card["status"] = "completion_requested"
+            cards.append(card)
+        compact_emit({"tasks": cards, **({"more": len(latest) - limit} if len(latest) > limit else {})})
+        return
+    selector = require_id(args.target)
+    matches = [row for row in rows if row[2]["id"] == selector and row[2]["kind"] in UNREAD_KINDS]
+    _, scope, event = unique_row(matches or latest_tasks(rows, selector))
+    detail = {"target": event["id"], **compact_body(event, MAX_READ_BODY if args.verbose or args.full else 1800)}
+    if args.verbose:
+        detail.update(metadata(event))
+    if event["kind"] == "task":
+        detail["issue"] = event.get("issue_key") or event["issue_id"]
+        bound = [(when, row) for when, route, row in rows if route == scope and bind(row) == bind(event)]
+        comments = sorted(((when, row) for when, row in bound if row["kind"] == "comment"),
+                          key=lambda x: (x[1].get("run_input") == "trigger", bool(x[1].get("run_input")), x[0], x[1]["id"]),
+                          reverse=True)
+        limit = MAX_LIST if args.verbose else 20 if args.full else 4
+        if comments:
+            detail["comments"] = [{"target": row["id"], **compact_body(row, MAX_READ_BODY if args.verbose or args.full else 500),
+                                   **({"input": row["run_input"]} if row.get("run_input") else {}),
+                                   **(metadata(row) if args.verbose else {})} for _, row in comments[:limit]]
+        if len(comments) > limit:
+            detail["more_comments"] = len(comments) - limit
+        if any(row.get("status") in TERMINAL for _, row in bound if row["kind"] == "receipt"):
+            detail["status"] = "completion_requested"
+        sync = [row for _, row in bound if row["kind"] == "sync"]
+        if sync:
+            latest = max(sync, key=lambda row: sync_order(0, row))
+            if latest.get("status") in {"retrying", "failed"}:
+                detail["sync"] = latest["status"]
+    compact_emit(detail)
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", help="absolute mailbox root; overrides project setup (BRIDGE_ROOT is a fallback)")
     p.add_argument("--connection", help="locally configured connection ID (requires --workspace)")
     p.add_argument("--workspace", help="exact Multica workspace ID (requires --connection)")
+    p.add_argument("--project", help="absolute project path when outside its checkout")
+    p.add_argument("--verbose", action="store_true", help="show expanded detail for compact commands")
     commands = p.add_subparsers(dest="command", required=True)
-    setup = commands.add_parser("setup", help="save local mailbox settings next to the installed SKILL.md")
+    setup = commands.add_parser("setup", help="save project mailbox settings to .local/mab.json")
     setup.add_argument("mailbox_root")
     setup.add_argument("--route", action="append", default=[], metavar="CONNECTION:SLUG_OR_UUID")
     setup.add_argument("--install-dir", help="absolute Bridge Compose install directory; defaults to the parent of the mailbox root")
+    commands.add_parser("tasks", help="summarize latest received task per Issue").add_argument("issue", nargs="?")
+    show = commands.add_parser("show", help="show a received Issue or event")
+    show.add_argument("target")
+    show.add_argument("--full", action="store_true", help="include longer task text and more comments")
+    commands.add_parser("result", help="check a submitted request").add_argument("target")
+    for kind in ("reply", "complete"):
+        action = commands.add_parser(kind, help=f"{kind} a run by exact event target")
+        action.add_argument("target")
+        action.add_argument("text")
     commands.add_parser("scopes", help="list available multi-connection outboxes")
     listing = commands.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)
@@ -706,24 +948,28 @@ def parser():
 
 def run(args):
     explicit_scope = selected_scope(args.connection, args.workspace)
+    config_path = project_config(args.project)
     if args.command == "setup":
         if args.root is not None or explicit_scope:
             raise MailboxError("use setup /absolute/path [--route CONNECTION:SLUG_OR_UUID ...]")
-        save_local_config(args.mailbox_root, args.install_dir, args.route)
+        save_local_config(config_path, args.mailbox_root, args.install_dir, args.route)
         return
-    saved_root, saved_routes = load_local_config()
+    saved_root, saved_routes = load_local_config(config_path)
     root = check_root(args.root or saved_root or os.environ.get("BRIDGE_ROOT"))
     same_root = saved_root is not None and os.path.realpath(root) == os.path.realpath(saved_root)
     routes = saved_routes if same_root else ()
     if explicit_scope and routes and explicit_scope not in routes:
         raise MailboxError("connection/workspace is not in this project's configured routes")
     scope = explicit_scope or (routes[0] if len(routes) == 1 and args.command != "scopes" else ())
-    if len(routes) > 1 and args.command not in {"list", "scopes"} and not explicit_scope:
+    if len(routes) > 1 and args.command not in {"list", "scopes", *COMPACT_COMMANDS} and not explicit_scope:
         raise MailboxError("multiple project routes; use the selected event's --connection and --workspace from list")
     if args.command == "submit" and args.yes and (args.rebind or not scope):
         raise MailboxError("--yes requires a scoped request and cannot be used with --rebind")
     root_fd = os.open(root, DIR_FLAGS)
     try:
+        if args.command in COMPACT_COMMANDS:
+            compact_command(root_fd, (explicit_scope,) if explicit_scope else routes or ((),), args)
+            return
         if args.command == "scopes":
             if scope:
                 raise MailboxError("scopes lists all outboxes; do not specify selectors")
@@ -780,39 +1026,8 @@ def run(args):
             elif args.command == "submit":
                 original = json_file(args.draft_path)
                 item = rebind_draft(outbox, original, args.rebind) if args.rebind else original
-                request = resolve_request(outbox, item)
-                inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
-                try:
-                    shelf = issue_inbox(inbox, request["issue_id"], create=True)
-                    try:
-                        validate(outbox, shelf, request)
-                        if args.rebind:
-                            validate_rebind_source(outbox, shelf, original)
-                        if not args.yes and not confirm(request, item["event_id"], original["request"] if args.rebind else None):
-                            raise MailboxError("submission cancelled; no request was written")
-                        verified = issue_inbox(inbox, request["issue_id"])
-                        try:
-                            # Serialize the final check and publish across CLI writers,
-                            # without holding the lock while an operator reviews a draft.
-                            fcntl.flock(verified, fcntl.LOCK_EX)
-                            verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
-                            verify_scope_directory(root_fd, "inbox", scope, inbox)
-                            if not os.path.samestat(os.fstat(shelf), os.fstat(verified)):
-                                raise MailboxError("issue inbox changed during confirmation")
-                            resolve_request(outbox, item)
-                            if args.rebind and rebind_draft(outbox, original, args.rebind) != item:
-                                raise MailboxError("rebind target changed during confirmation")
-                            validate(outbox, verified, request)
-                            if args.rebind:
-                                validate_rebind_source(outbox, verified, original)
-                            publish(verified, request)
-                        finally:
-                            os.close(verified)
-                    finally:
-                        os.close(shelf)
-                    emit({**scope_fields(scope), "request_id": request["id"], "status": "submitted_to_local_inbox"})
-                finally:
-                    os.close(inbox)
+                request = submit_item(root_fd, outbox, item, args.yes, args.rebind, original)
+                emit({**scope_fields(scope), "request_id": request["id"], "status": "submitted_to_local_inbox"})
         finally:
             os.close(outbox.directory)
     finally:
