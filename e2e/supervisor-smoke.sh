@@ -16,8 +16,9 @@ BRIDGE_GID=$(id -g)
 }
 
 umask 077
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/mab-supervisor.XXXXXXXX")
 project="mab-supervisor-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/mab-supervisor.XXXXXXXX")
+fixture=$(cd "$fixture" && pwd)
 BRIDGE_IMAGE="$project:fixture"
 BRIDGE_CONFIG="$fixture/connections.json"
 BRIDGE_SECRETS_DIR="$fixture/secrets"
@@ -105,6 +106,15 @@ compose up -d bridge
 container=$(compose ps -q bridge)
 [ -n "$container" ] || { echo 'Supervisor container did not start.' >&2; exit 1; }
 wait_status alpha=True:retrying beta=True:retrying
+# Both mounts must accept their per-connection binding before the missing PAT.
+for mount in runtime state; do
+  for id in alpha beta; do
+    if [ "$(cat "$BRIDGE_DATA_DIR/$mount/$id/.server-url")" != "https://$id.invalid" ]; then
+      echo "Missing or wrong $mount endpoint binding for $id." >&2
+      exit 1
+    fi
+  done
+done
 
 ctl stop alpha
 wait_status alpha=False:stopped beta=True:retrying
