@@ -17,9 +17,21 @@ coding agent, read real credentials, or connect to an outside workspace.
 Keep scheduling, delivery, and isolation regressions offline: the bridge tests
 cover independent Issues and endpoints, follow-up delivery and stale requests;
 the client and supervisor tests cover the API contract, routing and recovery.
-Run `make e2e-auto` on a Docker host to prove real Multica claim, reply and
-completion. CI runs it separately from offline checks and image publication. Record upstream version, command, and outcome;
-fixture success is not proof of a real Run.
+Regression CI runs on branch pushes and pull requests that change code,
+tests, or runtime/build inputs, including direct pushes to `main`. It skips
+standalone documentation edits outside the test paths. It does not publish
+images or block direct pushes; a failed check is reported on the commit.
+
+- `make check build` runs offline Go tests (with race detection), vet,
+  Python test discovery, shell syntax checks, and the Go build.
+- `make container-smoke` checks connection control through the installed
+  Compose entry point with synthetic connections. It does not use a live
+  Multica service.
+- `make e2e-auto` starts a disposable Multica to verify claim, reply and
+  completion. Record upstream version, command and outcome. Fixture success
+  alone is not proof of a real Run.
+
+Image publication is a separate workflow.
 
 When upgrading Multica, update the pinned upstream images in `Dockerfile` and
 `e2e/compose.yaml` together. Check the task API and ACP contract against the new
