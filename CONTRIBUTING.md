@@ -17,8 +17,8 @@ coding agent, read real credentials, or connect to an outside workspace.
 Keep scheduling, delivery, and isolation regressions offline: the bridge tests
 cover independent Issues and endpoints, follow-up delivery and stale requests;
 the client and supervisor tests cover the API contract, routing and recovery.
-Run the Docker smoke separately on a disposable stack to prove real Multica
-claim, reply and completion. Record upstream version, command, and outcome;
+Run `make e2e-auto` on a Docker host to prove real Multica claim, reply and
+completion. CI runs it separately from offline checks and image publication. Record upstream version, command, and outcome;
 fixture success is not proof of a real Run.
 
 When upgrading Multica, update the pinned upstream images in `Dockerfile` and

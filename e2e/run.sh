@@ -8,6 +8,36 @@ need_docker() {
   docker compose version >/dev/null
 }
 case "${1:-help}" in
+  verify)
+    need_docker
+    umask 077
+    project="mab-e2e-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+    if ! mkdir .local; then
+      echo 'verify needs a fresh checkout with no e2e/.local; existing data was not touched.' >&2
+      exit 2
+    fi
+    export COMPOSE_PROJECT_NAME="$project"
+    cleanup() {
+      result=$?
+      trap - EXIT
+      if [ -f .local/compose.env ]; then
+        if [ "$result" -ne 0 ]; then
+          compose --profile runtime ps -a || :
+        fi
+        compose --profile runtime down --volumes --remove-orphans || result=1
+      fi
+      rm -rf -- .local || result=1
+      exit "$result"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    sh ./run.sh up
+    python3 -B seed.py auth
+    sh ./run.sh bootstrap --token-file .local/pat
+    python3 -B seed.py dispatch
+    sh ./run.sh smoke --token-file .local/pat
+    ;;
   up)
     need_docker
     umask 077
@@ -30,5 +60,5 @@ case "${1:-help}" in
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; synthetic volumes and local files retained.' ;;
-  *) echo 'Usage: ./e2e/run.sh up|bootstrap [--token-file PATH]|smoke [--token-file PATH]|logs|down' ;;
+  *) echo 'Usage: ./e2e/run.sh verify|up|bootstrap [--token-file PATH]|smoke [--token-file PATH]|logs|down' ;;
 esac

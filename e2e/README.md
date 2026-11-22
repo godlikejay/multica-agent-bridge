@@ -2,10 +2,24 @@
 
 The smoke test covers one synthetic Issue on the pinned Multica v0.11.1
 Server/Web, one daemon and the current checkout's Bridge. It needs Docker
-Compose v2, Python 3 and a browser on the Docker host. It never needs a model
-key, coding agent, production account or real repository.
+Compose v2 and Python 3 on the Docker host. It never needs a model key,
+coding agent, production account or real repository.
 
-## Bootstrap once
+## Run unattended
+
+From a fresh checkout on a Docker host with Compose v2, Python 3, and ports
+13000 and 18080 free, run `make e2e-auto`. It starts a disposable stack,
+uses the pinned local development login to mint a one-day PAT for a synthetic
+account, starts the daemon, creates and assigns one test Issue, and runs the
+same protocol smoke below. It needs no browser, GitHub secret, or existing
+Multica account. The stack, test volumes, and local credentials are removed
+on exit. It refuses to run over an existing `e2e/.local` directory. Keep the
+fixed development verification code on this loopback-only fixture.
+
+GitHub Actions runs this one smoke separately from the offline tests and the
+image publisher. It tests the pinned self-hosted protocol, not Multica Cloud.
+
+## Bootstrap manually for debugging
 
 1. From a clean checkout on a Docker host with ports 13000 and 18080 free, run:
 
