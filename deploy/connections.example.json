@@ -1,0 +1,9 @@
+{
+  "connections": [
+    {
+      "id": "cloud",
+      "server_url": "https://api.multica.ai",
+      "token_file": "/run/secrets/cloud.pat"
+    }
+  ]
+}

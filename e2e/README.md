@@ -82,8 +82,8 @@ reading credentials:
 | Host-side verification script only | `http://127.0.0.1:18080` |
 | Inside Compose: Bridge, daemon, CLI login and web backend proxy | `http://backend:8080` |
 
-The browser URL is `MULTICA_APP_URL`, not the daemon API URL. The Docker
-hostname `backend` only resolves inside the Compose network; `localhost` inside
+Pass the browser URL directly to the browser-driving test operator. It is not
+a Bridge setting. The Docker hostname `backend` only resolves inside the Compose network; `localhost` inside
 the runtime refers to the runtime itself. Neither endpoint is a team or cloud
 Multica instance.
 

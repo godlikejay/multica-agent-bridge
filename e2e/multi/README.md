@@ -50,8 +50,9 @@ or reading credentials:
 | Host-side verification script only | `http://127.0.0.1:18180` | `http://127.0.0.1:18280` |
 | Inside Compose: runtime API and PAT login | `http://backend-a:8080` | `http://backend-b:8080` |
 
-The browser address is each connection's `app_url`; the internal Docker
-address is its `server_url`. Use the browser to create the synthetic account,
+Pass each browser address directly to the browser-driving test operator.
+Only the internal Docker API is written to each connection's `server_url`.
+Use the browser to create the synthetic account,
 PAT and test Agent for the matching instance. Do not enter the Docker
 hostname in a browser or substitute `localhost` for the runtime API.
 

@@ -67,7 +67,6 @@ def init():
     exclusive(ROOT / "compose.env", "\n".join(lines) + "\n")
     config = {"connections": [
         {"id": name, "server_url": urls_for(name)[2],
-         "app_url": urls_for(name)[0],
          "token_file": f"/run/secrets/{name}.pat", "max_active_runs": 2}
         for name in PORTS
     ]}

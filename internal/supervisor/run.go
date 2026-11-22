@@ -185,7 +185,7 @@ func childEnv(c Connection, home, root string) []string {
 	// No task identity or daemon control variables inherited from the parent
 	// shell. Upstream preserves HOME but strips inherited MULTICA_* for workers
 	// and injects its own task scope. HOME is reserved against custom overrides.
-	env := []string{
+	return []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=" + home,
 		"MULTICA_SERVER_URL=" + c.ServerURL,
@@ -197,10 +197,6 @@ func childEnv(c Connection, home, root string) []string {
 		"MULTICA_DAEMON_AUTO_UPDATE=false",
 		"MULTICA_DAEMON_AUTO_RELOAD=false",
 	}
-	if c.AppURL != "" {
-		env = append(env, "MULTICA_APP_URL="+c.AppURL)
-	}
-	return env
 }
 
 func runCommand(ctx context.Context, env []string, stdin io.Reader, grace time.Duration, args ...string) error {

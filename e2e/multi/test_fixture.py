@@ -51,11 +51,10 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(len(configs), 2)
         self.assertEqual([line.split()[-1] for line in out.getvalue().splitlines()
                           if "http://" in line], [
-            configs[0]["app_url"], "http://127.0.0.1:18180", configs[0]["server_url"],
-            configs[1]["app_url"], "http://127.0.0.1:18280", configs[1]["server_url"],
+            "http://localhost:13100", "http://127.0.0.1:18180", configs[0]["server_url"],
+            "http://localhost:13200", "http://127.0.0.1:18280", configs[1]["server_url"],
         ])
-        self.assertEqual([c["app_url"] for c in configs],
-                         ["http://localhost:13100", "http://localhost:13200"])
+        self.assertTrue(all("app_url" not in c for c in configs))
 
     def test_accepts_scoped_outbox_and_refuses_incorrect_scope(self):
         a, p = self.event("a")

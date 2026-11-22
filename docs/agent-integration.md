@@ -9,12 +9,15 @@ mailbox tool; the agent and your terminal need local access to the mailbox.
 
 ## Install one copy
 
-From a checkout of this repository, copy the **whole** directory into the
-project where the agent works. Keep its folder name and contents unchanged:
+From the project where the agent works, download the Skill and its helper.
+Use the same source revision as your image if you pinned the image by commit:
 
 ```sh
-mkdir -p /path/to/project/.agents/skills
-cp -R skills/multica-bridge /path/to/project/.agents/skills/
+skill=.agents/skills/multica-bridge
+src=https://raw.githubusercontent.com/godlikejay/multica-agent-bridge/main/skills/multica-bridge
+mkdir -p "$skill/scripts"
+curl -fsSLo "$skill/SKILL.md" "$src/SKILL.md"
+curl -fsSLo "$skill/scripts/mailbox.py" "$src/scripts/mailbox.py"
 ```
 
 Do not add local mailbox paths, logs, drafts or credentials to that project.
@@ -31,22 +34,30 @@ approve an action, or start a task. Use the same CLI directly without an agent.
 
 ## The operator's mailbox workflow
 
-From the Bridge checkout, for example:
+For the [image-only install](../deploy/README.md), set the mailbox root to
+your install directory's `data/` (or the path in `BRIDGE_DATA_DIR`).
+After the first task arrives, run `scopes` and include the same
+`--connection ID --workspace UUID` in every read/draft/submit command.
+The two IDs are listed by `scopes`. See the first-reply example in that guide.
+
+From a shell with access to the installed mailbox, set its root and use the
+connection and workspace listed by `scopes`:
 
 ```sh
-export BRIDGE_ROOT="$PWD/.bridge"
-tool=skills/multica-bridge/scripts/mailbox.py
-python3 "$tool" list --issue-id ISSUE_ID  # Omit the filter to find task IDs.
-python3 "$tool" pickup ISSUE_ID --worktree /absolute/path/to/checkout
-python3 "$tool" status ISSUE_ID
-python3 "$tool" list --issue-id ISSUE_ID --unread
-python3 "$tool" read EVENT_ID
-python3 "$tool" ack EVENT_ID  # Explicitly mark a reviewed task/comment.
-python3 "$tool" draft EVENT_ID --kind reply --body-file reply.txt > reply.draft.json
-python3 "$tool" pickup ISSUE_ID --draft "$PWD/reply.draft.json"
+export BRIDGE_ROOT=/absolute/path/to/install/data
+tool=/absolute/path/to/project/.agents/skills/multica-bridge/scripts/mailbox.py
+mailbox() { python3 "$tool" --connection CONNECTION_ID --workspace WORKSPACE_UUID "$@"; }
+mailbox list --issue-id ISSUE_ID  # Omit the filter to find task IDs.
+mailbox pickup ISSUE_ID --worktree /absolute/path/to/checkout
+mailbox status ISSUE_ID
+mailbox list --issue-id ISSUE_ID --unread
+mailbox read EVENT_ID
+mailbox ack EVENT_ID  # Explicitly mark a reviewed task/comment.
+mailbox draft EVENT_ID --kind reply --body-file reply.txt > reply.draft.json
+mailbox pickup ISSUE_ID --draft "$PWD/reply.draft.json"
 # Run this yourself, in a terminal, after reviewing destination and exact text.
-python3 "$tool" submit reply.draft.json
-python3 "$tool" receipt REQUEST_ID --issue-id ISSUE_ID
+mailbox submit reply.draft.json
+mailbox receipt REQUEST_ID --issue-id ISSUE_ID
 ```
 
 `list` shows metadata, not the full message backlog. Pick the actual event and
@@ -64,7 +75,7 @@ was acknowledged. Keep pickup state and draft files out of the project repo.
 
 A draft is not an Inbox request. The operator's `submit` validates scope against
 the available local events, shows exactly what will be sent, and asks for
-confirmation before atomically creating the file under `inbox/<issue_id>/`. The Bridge independently
+confirmation before atomically creating the file under `inbox/<connection_id>/<workspace_id>/<issue_id>/`. The Bridge independently
 checks the active binding. This is not a security boundary against other
 processes with identical filesystem and terminal privileges. To enforce a
 human-only write boundary, restrict the agent to outbox and a scratch/draft

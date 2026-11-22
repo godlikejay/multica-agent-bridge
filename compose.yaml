@@ -17,8 +17,6 @@ services:
       HOME: /home/runtime
       BRIDGE_ROOT: /bridge
       MULTICA_SERVER_URL: ${MULTICA_SERVER_URL:?set the existing Multica HTTPS API URL}
-      # Optional upstream browser URL; token login and the daemon use SERVER_URL.
-      MULTICA_APP_URL: ${MULTICA_APP_URL:-}
       MULTICA_DAEMON_DEVICE_NAME: ${BRIDGE_DEVICE_NAME:-multica-agent-bridge}
       MULTICA_AGENT_RUNTIME_NAME: ${BRIDGE_DEVICE_NAME:-multica-agent-bridge}
       MULTICA_WORKSPACES_ROOT: /workspaces

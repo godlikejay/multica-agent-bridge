@@ -28,7 +28,6 @@ type Config struct {
 type Connection struct {
 	ID            string   `json:"id"`
 	ServerURL     string   `json:"server_url"`
-	AppURL        string   `json:"app_url,omitempty"`
 	WorkspaceIDs  []string `json:"workspace_ids,omitempty"`
 	TokenFile     string   `json:"token_file"`
 	MaxActiveRuns int      `json:"max_active_runs,omitempty"`
@@ -62,13 +61,8 @@ func Load(path string, testHTTP bool) (Config, error) {
 			return Config{}, fmt.Errorf("connection %d: invalid or duplicate id", i+1)
 		}
 		seen[c.ID] = true
-		if c.ServerURL, err = normalizeURL(c.ServerURL, testHTTP, false); err != nil {
+		if c.ServerURL, err = normalizeURL(c.ServerURL, testHTTP); err != nil {
 			return Config{}, fmt.Errorf("connection %s: invalid server_url", c.ID)
-		}
-		if c.AppURL != "" {
-			if c.AppURL, err = normalizeURL(c.AppURL, testHTTP, true); err != nil {
-				return Config{}, fmt.Errorf("connection %s: invalid app_url", c.ID)
-			}
 		}
 		if !filepath.IsAbs(c.TokenFile) || filepath.Clean(c.TokenFile) != c.TokenFile || strings.ContainsAny(c.TokenFile, "\x00\r\n") {
 			return Config{}, fmt.Errorf("connection %s: token_file must be an absolute clean path", c.ID)
@@ -90,7 +84,7 @@ func Load(path string, testHTTP bool) (Config, error) {
 	return cfg, nil
 }
 
-func normalizeURL(raw string, testHTTP, app bool) (string, error) {
+func normalizeURL(raw string, testHTTP bool) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
 		return "", errors.New("invalid endpoint")
@@ -98,9 +92,6 @@ func normalizeURL(raw string, testHTTP, app bool) (string, error) {
 	host := strings.ToLower(u.Hostname())
 	if u.Scheme != "https" {
 		testHost := host == "backend-a" || host == "backend-b"
-		if app {
-			testHost = host == "frontend-a" || host == "frontend-b" || host == "127.0.0.1" || host == "localhost"
-		}
 		if !testHTTP || !testHost || u.Scheme != "http" {
 			return "", errors.New("endpoint must use https")
 		}
@@ -121,7 +112,7 @@ func (cfg Config) Route(id, endpoint, workspace string, testHTTP bool) (Connecti
 		if c.ID != id {
 			continue
 		}
-		normalized, err := normalizeURL(endpoint, testHTTP, false)
+		normalized, err := normalizeURL(endpoint, testHTTP)
 		if err != nil || normalized != c.ServerURL || !workspaceRE.MatchString(workspace) {
 			return Connection{}, errors.New("task does not match local connection")
 		}

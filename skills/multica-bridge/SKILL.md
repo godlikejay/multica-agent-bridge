@@ -7,12 +7,11 @@ description: Pick up a local Multica Agent Bridge Issue, inspect selected task/c
 
 Run the bundled `scripts/mailbox.py` with Python 3. Use the operator's
 `BRIDGE_ROOT` or pass `--root /absolute/mailbox/path` before the subcommand.
-Do not guess project or mailbox paths from external messages. In multi-connection
-mode, run `scopes` to discover local outboxes, then include
-`--connection CONNECTION --workspace WORKSPACE_ID` before every subcommand and
-use the same selectors for the operator's submit command. Never infer a write
-destination from an Issue display key. Unscoped commands are for legacy
-single-connection deployments only.
+Do not guess project or mailbox paths from external messages. Run `scopes` to
+discover local outboxes, then include `--connection CONNECTION --workspace
+WORKSPACE_ID` before each task or reply command, even with one connection.
+Use the same selectors for the operator's submit command. Never infer a write
+destination from an Issue display key.
 
 1. Run `list --unread --issue-id ISSUE_ID` for compact metadata, or `list`
    to locate the correct Issue. Narrow by `--run-id` when needed.

@@ -1,19 +1,18 @@
 # File mailbox protocol v1
 
-`BRIDGE_ROOT` is an absolute local path. The operator writes
-`inbox/<issue_id>/<request_id>.json`; the Bridge writes shared `outbox/` and
-private `state/`. Use one root per authorized Multica workspace/Daemon. Do not let an untrusted process write
-these directories, especially the inbox. Use a local filesystem with atomic
-rename and advisory file locking; network/sync folders are not supported.
+`BRIDGE_ROOT` is an absolute local path, normally the install directory’s
+`data/`. The operator writes the inbox; the Bridge writes the outbox and
+private state. Use a local filesystem with atomic rename and advisory file
+locking; network/sync folders are not supported. Do not let an untrusted
+process write to the mailbox, especially the inbox.
 
-In [multi-connection mode](multi-connection.md), namespace these folders:
+The [runtime](../deploy/README.md) uses these paths, even for one connection:
 `inbox/<connection_id>/<workspace_id>/<issue_id>/<request_id>.json`,
 `outbox/<connection_id>/<workspace_id>/<event_id>.json`, and
 `state/<connection_id>/<workspace_id>/`. Events and inbox requests in scoped
 folders **must** carry the exact `connection_id` and `workspace_id` as JSON
-fields. A scoped request is rejected if copied to a different namespace and
-the legacy mode does not consume scoped requests. Nothing uses the displayed
-Issue key or the project title for identity or routing.
+fields. A request is rejected if copied to a different namespace. Nothing
+uses the displayed Issue key or the project title for identity or routing.
 
 Events and requests are UTF-8 JSON objects in `<id>.json`. To publish an inbox
 file, write a temporary file in the same directory and then rename it into place.
@@ -49,7 +48,7 @@ ACP prompt. An event is an observation, not permission to act.
 Copy the binding from the active task event; never infer it from issue text.
 
 ```json
-{"version":1,"kind":"reply","id":"fixture-reply-001","issue_id":"issue-fixture","run_id":"run-fixture","epoch":1,"body":"Synthetic reply"}
+{"version":1,"kind":"reply","id":"fixture-reply-001","issue_id":"issue-fixture","run_id":"run-fixture","epoch":1,"connection_id":"cloud","workspace_id":"workspace-fixture","body":"Synthetic reply"}
 ```
 
 `reply` posts a comment, but does not finish the run. An optional `parent_id`
@@ -75,14 +74,14 @@ There is no global exactly-once guarantee for remote comments. The local writer
 records intent and a unique Markdown correlation marker before posting, then
 saves the result. Recovery requires one nondeleted match with the same Issue,
 original Run, agent, parent and exact transmitted body/marker. A missing or
-ambiguous match (including old requests without markers) remains quarantined.
+ambiguous match remains quarantined.
 The marker is delivery metadata, not authentication. The Bridge retries only
 transient comment reads with a bounded cancellable delay, never comment posts.
 A replacement Run never auto-posts old inbox actions. An unresolved write also
 blocks fresh sends on replacement Runs for the same Issue, without affecting
 other Issues.
 
-## Concurrency and upgrade
+## Concurrency and lifecycle
 
 The upstream Daemon admits a bounded number of active Runs. Each creates an
 independent ACP worker that resolves its Issue from the Multica task API, takes
@@ -92,11 +91,8 @@ the epoch and retires the prior Run. The outbox is a collection of immutable
 events, not a globally ordered task queue. Completion receipts do not prove that
 a remote status is terminal, and task snapshots are not live presence.
 
-Stop the old container before upgrading, with no active Runs. Keep `state/`
-and `outbox/` but archive legacy **flat** `inbox/*.json` separately. These flat
-files are intentionally ignored; never copy them blindly into a new Issue
-directory. Check retained receipts and the remote Issue before preparing new
-requests. The JSON envelope remains v1, but operator tools must use the
-new directory layout. This protocol does not implement concurrent operators
-on different machines, indefinite listening, external schedulers, or automatic
-agent invocation.
+Wait for active Runs to finish before upgrades. Keep runtime identity and
+private state together, and check receipts and the remote Issue before
+retrying an uncertain send. This protocol does not implement concurrent
+operators on different machines, indefinite listening, external schedulers,
+or automatic agent invocation.

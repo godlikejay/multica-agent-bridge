@@ -18,10 +18,10 @@ runtime image includes Multica Daemon and Bridge. You do not need Go, a model
 API key, or a separate Daemon installation. The host mailbox tool uses
 Python 3 (standard library only).
 
-Start with the [Docker install guide](docs/deployment.md). It takes you from
-creating your Multica token to receiving a test Issue and sending a reply.
-Start with one connection; use the [multi-connection guide](docs/multi-connection.md)
-only if you need one container to connect to several servers or accounts.
+Start with the [image-only install guide](deploy/README.md): download two
+small config files, save your Multica token, and run `docker compose up -d`.
+No Git checkout is required. The same Compose file supports one or more
+Multica connections.
 
 After the mailbox works, install the [coding agent skill](docs/agent-integration.md)
 for Codex, Antigravity CLI, or Oh My Pi. The skill drafts replies; you decide

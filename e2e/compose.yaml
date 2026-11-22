@@ -76,7 +76,6 @@ services:
       BRIDGE_ALLOW_TEST_HTTP: "1"
       # Runtime and CLI call the internal API, not the browser address.
       MULTICA_SERVER_URL: http://backend:8080
-      MULTICA_APP_URL: http://localhost:13000
       MULTICA_HERMES_PATH: /usr/local/bin/multica-bridge
       MULTICA_DAEMON_DEVICE_NAME: synthetic-bridge-e2e
       MULTICA_AGENT_RUNTIME_NAME: synthetic-bridge-e2e

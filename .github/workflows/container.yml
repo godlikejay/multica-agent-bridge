@@ -3,6 +3,16 @@ name: Build container image
 on:
   push:
     branches: [main]
+    # Mirror the runtime Docker build inputs, plus this workflow.
+    paths:
+      - '.github/workflows/container.yml'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'LICENSE'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
   workflow_dispatch:
 
 permissions:

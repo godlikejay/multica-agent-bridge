@@ -1,0 +1,42 @@
+name: multica-agent-bridge-runtime
+services:
+  bridge:
+    image: "${BRIDGE_IMAGE:-ghcr.io/godlikejay/multica-agent-bridge:latest}"
+    user: "${BRIDGE_UID:?set BRIDGE_UID to your non-root host user ID}:${BRIDGE_GID:?set BRIDGE_GID to your host group ID}"
+    entrypoint: ["/usr/local/bin/multica-bridge"]
+    command: ["serve", "--config", "/etc/multica-bridge/connections.json"]
+    init: true
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: "${BRIDGE_CONFIG:-./connections.json}"
+        target: /etc/multica-bridge/connections.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BRIDGE_SECRETS_DIR:-./secrets}"
+        target: /run/secrets
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BRIDGE_DATA_DIR:-./data}/runtime"
+        target: /bridge-runtime
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BRIDGE_DATA_DIR:-./data}/inbox"
+        target: /bridge/inbox
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BRIDGE_DATA_DIR:-./data}/outbox"
+        target: /bridge/outbox
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BRIDGE_DATA_DIR:-./data}/state"
+        target: /bridge/state
+        bind: {create_host_path: false}
