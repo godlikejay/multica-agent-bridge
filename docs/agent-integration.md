@@ -1,5 +1,7 @@
 # Use the mailbox from a coding agent
 
+English | [简体中文](zh-CN/agent-integration.md)
+
 Use the same [portable skill](../skills/multica-bridge/SKILL.md) for Codex,
 Antigravity CLI (`agy`), or Oh My Pi (`omp`). There is no per-agent service or
 MCP server. The folder contains the instructions and a Python 3 standard-library

@@ -59,6 +59,7 @@ services:
       <<: *backend-env
       DATABASE_URL: postgres://multica_e2e:${A_DB_PASSWORD:?run init}@postgres-a:5432/multica_e2e?sslmode=disable
       JWT_SECRET: ${A_JWT_SECRET:?run init}
+      # Browser origin on the operator host; the daemon uses the Docker API below.
       FRONTEND_ORIGIN: http://localhost:13100
       MULTICA_APP_URL: http://localhost:13100
       MULTICA_DAEMON_SERVER_URL: http://backend-a:8080
@@ -94,6 +95,7 @@ services:
       <<: *backend-env
       DATABASE_URL: postgres://multica_e2e:${B_DB_PASSWORD:?run init}@postgres-b:5432/multica_e2e?sslmode=disable
       JWT_SECRET: ${B_JWT_SECRET:?run init}
+      # Browser origin on the operator host; the daemon uses the Docker API below.
       FRONTEND_ORIGIN: http://localhost:13200
       MULTICA_APP_URL: http://localhost:13200
       MULTICA_DAEMON_SERVER_URL: http://backend-b:8080

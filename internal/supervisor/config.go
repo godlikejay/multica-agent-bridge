@@ -28,7 +28,7 @@ type Config struct {
 type Connection struct {
 	ID            string   `json:"id"`
 	ServerURL     string   `json:"server_url"`
-	AppURL        string   `json:"app_url"`
+	AppURL        string   `json:"app_url,omitempty"`
 	WorkspaceIDs  []string `json:"workspace_ids,omitempty"`
 	TokenFile     string   `json:"token_file"`
 	MaxActiveRuns int      `json:"max_active_runs,omitempty"`
@@ -65,8 +65,10 @@ func Load(path string, testHTTP bool) (Config, error) {
 		if c.ServerURL, err = normalizeURL(c.ServerURL, testHTTP, false); err != nil {
 			return Config{}, fmt.Errorf("connection %s: invalid server_url", c.ID)
 		}
-		if c.AppURL, err = normalizeURL(c.AppURL, testHTTP, true); err != nil {
-			return Config{}, fmt.Errorf("connection %s: invalid app_url", c.ID)
+		if c.AppURL != "" {
+			if c.AppURL, err = normalizeURL(c.AppURL, testHTTP, true); err != nil {
+				return Config{}, fmt.Errorf("connection %s: invalid app_url", c.ID)
+			}
 		}
 		if !filepath.IsAbs(c.TokenFile) || filepath.Clean(c.TokenFile) != c.TokenFile || strings.ContainsAny(c.TokenFile, "\x00\r\n") {
 			return Config{}, fmt.Errorf("connection %s: token_file must be an absolute clean path", c.ID)

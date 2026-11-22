@@ -26,6 +26,7 @@ services:
       JWT_SECRET: ${E2E_JWT_SECRET:?run init}
       APP_ENV: development
       MULTICA_DEV_VERIFICATION_CODE: "888888"
+      # Browser origin on the operator host, not a Docker service name.
       FRONTEND_ORIGIN: http://localhost:13000
       MULTICA_APP_URL: http://localhost:13000
       MULTICA_DAEMON_SERVER_URL: http://backend:8080
@@ -73,6 +74,7 @@ services:
       HOME: /home/runtime
       BRIDGE_ROOT: /bridge
       BRIDGE_ALLOW_TEST_HTTP: "1"
+      # Runtime and CLI call the internal API, not the browser address.
       MULTICA_SERVER_URL: http://backend:8080
       MULTICA_APP_URL: http://localhost:13000
       MULTICA_HERMES_PATH: /usr/local/bin/multica-bridge

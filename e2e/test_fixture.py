@@ -65,6 +65,12 @@ class FixtureTest(unittest.TestCase):
             self.assertIn('/api/daemon/tasks/', get.call_args.args[0])
         with patch.object(f.getpass, 'getpass', return_value='synthetic'), patch.object(f, 'get', return_value={'status':'failed'}):
             with self.assertRaises(SystemExit): f.verify('00000000-0000-0000-0000-000000000001')
+    def test_display_fixed_browser_host_and_docker_addresses(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            f.print_urls(f.BROWSER, f.API, f.DOCKER_API)
+        self.assertEqual([line.split()[-1] for line in out.getvalue().splitlines()], [
+            'http://localhost:13000', 'http://127.0.0.1:18080', 'http://backend:8080',
+        ])
     def test_health_checks_api_and_frontend_separately(self):
         with patch.object(f, 'get') as get, patch.object(f, 'web_ready') as web:
             with contextlib.redirect_stdout(io.StringIO()): f.health()

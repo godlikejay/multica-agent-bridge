@@ -42,6 +42,21 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual([x["server_url"] for x in cfg["connections"]],
                          ["http://backend-a:8080", "http://backend-b:8080"])
 
+    def test_display_mapping_matches_each_connection_config(self):
+        with patch.object(f.os, "getuid", return_value=1000), redirect_stdout(io.StringIO()):
+            f.init()
+        with redirect_stdout(io.StringIO()) as out:
+            f.urls()
+        configs = json.loads((self.root / "connections.json").read_text())["connections"]
+        self.assertEqual(len(configs), 2)
+        self.assertEqual([line.split()[-1] for line in out.getvalue().splitlines()
+                          if "http://" in line], [
+            configs[0]["app_url"], "http://127.0.0.1:18180", configs[0]["server_url"],
+            configs[1]["app_url"], "http://127.0.0.1:18280", configs[1]["server_url"],
+        ])
+        self.assertEqual([c["app_url"] for c in configs],
+                         ["http://localhost:13100", "http://localhost:13200"])
+
     def test_accepts_scoped_outbox_and_refuses_incorrect_scope(self):
         a, p = self.event("a")
         self.assertEqual(f.read_task("a", p), a)

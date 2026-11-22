@@ -75,13 +75,23 @@ func TestChildEnvironmentLacksInheritedSecretsOrScopes(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://proxy.example.invalid")
 	c := Connection{ID: "work", ServerURL: "https://api.example.invalid", AppURL: "https://app.example.invalid", MaxActiveRuns: 2}
 	env := childEnv(c, "/bridge-runtime/work/home", "/bridge-runtime/work/workspaces")
-	for _, s := range []string{"HOME=/bridge-runtime/work/home", "MULTICA_SERVER_URL=" + c.ServerURL, "MULTICA_DAEMON_MAX_CONCURRENT_TASKS=2"} {
+	for _, s := range []string{"HOME=/bridge-runtime/work/home", "MULTICA_SERVER_URL=" + c.ServerURL, "MULTICA_APP_URL=" + c.AppURL, "MULTICA_DAEMON_MAX_CONCURRENT_TASKS=2"} {
 		if !slices.Contains(env, s) {
 			t.Errorf("missing %q", s)
 		}
 	}
 	if got := strings.Join(env, "\n"); strings.Contains(got, "sensitive") || strings.Contains(got, "/bad/path") || strings.Contains(got, "HTTPS_PROXY") {
 		t.Fatal("leaked unrelated env")
+	}
+}
+
+func TestChildEnvironmentDoesNotInventAppURL(t *testing.T) {
+	t.Setenv("MULTICA_APP_URL", "https://unrelated.example.invalid")
+	c := Connection{ID: "work", ServerURL: "https://api.example.invalid", MaxActiveRuns: 2}
+	for _, entry := range childEnv(c, "/bridge-runtime/work/home", "/bridge-runtime/work/workspaces") {
+		if strings.HasPrefix(entry, "MULTICA_APP_URL=") {
+			t.Fatal("API-only connection must not set a browser URL")
+		}
 	}
 }
 

@@ -10,7 +10,6 @@ import secrets
 import subprocess
 import time
 import urllib.error
-import urllib.request
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -23,7 +22,6 @@ PORTS = {"a": (13100, 18180), "b": (13200, 18280)}
 spec = importlib.util.spec_from_file_location("single_fixture", HERE.parent / "fixture.py")
 single = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(single)
-single.OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), single.NoRedirect)
 
 
 def uuid_field(value):
@@ -44,6 +42,17 @@ def exclusive(path, content):
     return True
 
 
+def urls_for(name):
+    web, api = PORTS[name]
+    return f"http://localhost:{web}", f"http://127.0.0.1:{api}", f"http://backend-{name}:8080"
+
+
+def urls():
+    for name in PORTS:
+        print(f"Synthetic endpoint {name.upper()}:")
+        single.print_urls(*urls_for(name))
+
+
 def init():
     if os.getuid() == 0:
         raise SystemExit("Run the synthetic fixture as a regular host user.")
@@ -57,10 +66,10 @@ def init():
         lines.extend(f"{name.upper()}_{key}={secrets.token_hex(32)}" for key in ("DB_PASSWORD", "JWT_SECRET"))
     exclusive(ROOT / "compose.env", "\n".join(lines) + "\n")
     config = {"connections": [
-        {"id": name, "server_url": f"http://backend-{name}:8080",
-         "app_url": f"http://localhost:{web}",
+        {"id": name, "server_url": urls_for(name)[2],
+         "app_url": urls_for(name)[0],
          "token_file": f"/run/secrets/{name}.pat", "max_active_runs": 2}
-        for name, (web, _) in PORTS.items()
+        for name in PORTS
     ]}
     exclusive(ROOT / "connections.json", json.dumps(config, indent=2) + "\n")
     print("Created missing disposable paths/configs. No accounts or Docker services started.")
@@ -82,7 +91,7 @@ def save_token(name):
     path = token_path(name)
     if path.exists() or path.is_symlink():
         raise SystemExit(f"Synthetic token {name} already exists; no overwrite performed.")
-    value = validate_token(getpass.getpass(f"Synthetic PAT from localhost:{PORTS[name][0]} (hidden): "))
+    value = validate_token(getpass.getpass(f"Synthetic PAT created in {urls_for(name)[0]} (hidden): "))
     if not exclusive(path, value + "\n"):
         raise SystemExit("Token file already exists.")
     print(f"Saved local synthetic token for {name}; value not displayed.")
@@ -96,11 +105,10 @@ def read_token(name):
 
 
 def address(name):
-    web, api = PORTS[name]
     # Only local published fixture URLs are ever queried; do not read them
     # from CLI arguments, environment variables, config, or issue data.
-    single.API = f"http://127.0.0.1:{api}"
-    single.WEB = f"http://localhost:{web}"
+    single.BROWSER, single.API, _ = urls_for(name)
+    single.WEB = f"http://127.0.0.1:{PORTS[name][0]}"
 
 
 def health():
@@ -383,7 +391,7 @@ def accept(path_a, path_b):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "health", "credentials"):
+    for name in ("init", "health", "urls", "credentials"):
         commands.add_parser(name)
     commands.add_parser("token").add_argument("name", choices=PORTS)
     p_accept = commands.add_parser("accept")
@@ -395,6 +403,8 @@ def main():
             init()
         elif arg.command == "health":
             health()
+        elif arg.command == "urls":
+            urls()
         elif arg.command == "token":
             save_token(arg.name)
         elif arg.command == "credentials":

@@ -39,6 +39,22 @@ docker image inspect --format '{{json .RepoDigests}}' \
 then runs readiness checks. It does not yet start the shared runtime or
 prove registration. If readiness fails, run `./e2e/multi/run.sh logs`.
 
+## Which URL goes where
+
+`./e2e/multi/run.sh urls` prints both fixed mappings without starting Docker
+or reading credentials:
+
+| Scope | A | B |
+| --- | --- | --- |
+| Browser on the Docker host: setup and test Agent UI | `http://localhost:13100` | `http://localhost:13200` |
+| Host-side verification script only | `http://127.0.0.1:18180` | `http://127.0.0.1:18280` |
+| Inside Compose: runtime API and PAT login | `http://backend-a:8080` | `http://backend-b:8080` |
+
+The browser address is each connection's `app_url`; the internal Docker
+address is its `server_url`. Use the browser to create the synthetic account,
+PAT and test Agent for the matching instance. Do not enter the Docker
+hostname in a browser or substitute `localhost` for the runtime API.
+
 ## One-time synthetic bootstrap (human)
 
 1. In separate browser profiles (or one normal and one private window), open **http://localhost:13100**
@@ -68,9 +84,12 @@ prove registration. If readiness fails, run `./e2e/multi/run.sh logs`.
    one synthetic Agent on each site to its own runtime with Hermes selected
    (the Bridge implementation), without model keys, external MCP servers or
    real repositories. If you use the CLI to set up a project, select the
-   actual synthetic workspace UUID first:
+   actual synthetic workspace UUID first. Find it in the matching UI or list
+   it with the same authenticated container profile:
 
    ```sh
+   ./e2e/multi/run.sh cli a workspace list --full-id
+   ./e2e/multi/run.sh cli b workspace list --full-id
    ./e2e/multi/run.sh workspace a WORKSPACE_A_UUID
    ./e2e/multi/run.sh workspace b WORKSPACE_B_UUID
    ```

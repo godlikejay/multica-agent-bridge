@@ -1,5 +1,7 @@
 # Multica Agent Bridge
 
+English | [简体中文](README.zh-CN.md)
+
 A file mailbox between a [Multica](https://github.com/multica-ai/multica) issue run
 and a local operator. The bridge uses Multica's Hermes ACP interface without
 running a model. It does not launch or control an agent, open a checkout, or
@@ -9,27 +11,21 @@ This repository is an early prototype with one writer per Issue. Do not connect 
 team or production workspace until the disposable integration suite passes and
 the operating permissions have been reviewed.
 
-## Quick start
+## Install with Docker Compose
 
-- Go 1.24+ on Linux or macOS: `make check` runs synthetic tests, and
-  `make build` builds `bin/multica-bridge`.
-- Docker Compose v2: see [the integration runbook](e2e/README.md) for the
-  fresh-machine setup, local image build, and one- and two-Issue acceptance
-  tests against pinned Multica. No model account or coding agent is needed.
+You need Docker Compose v2 and access to an existing Multica service. The
+runtime image includes Multica Daemon and Bridge. You do not need Go, a model
+API key, or a separate Daemon installation. The host mailbox tool uses
+Python 3 (standard library only).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for where to make changes and what counts as
-evidence, and [the protocol](docs/protocol.md) for file formats and receipts.
+Start with the [Docker install guide](docs/deployment.md). It takes you from
+creating your Multica token to receiving a test Issue and sending a reply.
+Start with one connection; use the [multi-connection guide](docs/multi-connection.md)
+only if you need one container to connect to several servers or accounts.
 
-## Use with an existing Multica
-
-Build one runtime image containing Multica Daemon and Bridge, then start it
-with Compose. See [Docker setup](docs/deployment.md) for configuration and
-one-time login, and the [agent installation and mailbox tool](docs/agent-integration.md)
-for Codex, Antigravity CLI and Oh My Pi.
-
-To connect to multiple Multica instances from **one runtime container**, see
-[Multi-connection Docker setup](docs/multi-connection.md) and the
-[two-service acceptance runbook](e2e/multi/README.md).
+After the mailbox works, install the [coding agent skill](docs/agent-integration.md)
+for Codex, Antigravity CLI, or Oh My Pi. The skill drafts replies; you decide
+what to submit. See the [English documentation index](docs/README.md) for more.
 
 ## Scope
 
@@ -47,4 +43,11 @@ draft reference) separate from its live Run and from other Issues. The pickup
 tool does not start agents, change Multica, or turn a draft into an approved
 reply. See [the operator workflow](docs/agent-integration.md).
 
-Licensed under [Apache-2.0](LICENSE).
+## Licenses
+
+Bridge source is licensed under [Apache-2.0](LICENSE). The runtime image is
+built on [Multica](https://github.com/multica-ai/multica) and bundles its
+v0.11.1 CLI/Daemon under the [Multica License](https://github.com/multica-ai/multica/blob/v0.11.1/LICENSE).
+The image includes both components' license files and the upstream
+[Multica NOTICE](https://github.com/multica-ai/multica/blob/v0.11.1/NOTICE)
+under `/usr/share/licenses/`.

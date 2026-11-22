@@ -19,10 +19,15 @@ case "${1:-help}" in
     compose --profile runtime build proxy runtime
     compose up -d postgres backend frontend proxy
     python3 fixture.py health
-    echo 'Open http://localhost:13000; human setup required (see e2e/README.md).' ;;
+    python3 -B fixture.py urls
+    echo 'Human setup required (see e2e/README.md).' ;;
+  urls) python3 -B fixture.py urls ;;
   login)
     need_docker
     compose --profile runtime run --rm runtime --profile e2e --server-url http://backend:8080 login --token ;;
+  workspaces)
+    need_docker
+    compose --profile runtime run --rm --no-deps runtime --profile e2e workspace list --full-id ;;
   workspace)
     need_docker; test "$#" -eq 2
     compose --profile runtime run --rm runtime --profile e2e config set workspace_id "$2" ;;
@@ -62,5 +67,5 @@ case "${1:-help}" in
   down)
     need_docker; compose --profile runtime down
     echo 'Stopped; test state retained. No volumes/files deleted.' ;;
-  *) echo 'Usage: ./e2e/run.sh init|up|versions|login|workspace UUID|runtime|status|restart|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
+  *) echo 'Usage: ./e2e/run.sh init|up|urls|versions|login|workspaces|workspace UUID|runtime|status|restart|health|smoke TASK_JSON|parallel TASK_A_JSON TASK_B_JSON [--finish-a]|fixture TASK_JSON|verify RUN_ID|logs|down' ;;
 esac

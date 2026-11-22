@@ -71,6 +71,22 @@ Telemetry is disabled; no email/LLM/OAuth/integration keys are supplied.
 The internal hostname `backend` needs the explicit `BRIDGE_ALLOW_TEST_HTTP=1`
 test exception; normal production HTTPS validation must stay strict.
 
+## Which URL goes where
+
+`./e2e/run.sh urls` prints the fixed endpoints, without starting Docker or
+reading credentials:
+
+| Use | URL |
+| --- | --- |
+| Browser on the Docker host: sign up, create a synthetic PAT, configure the test Agent | `http://localhost:13000` |
+| Host-side verification script only | `http://127.0.0.1:18080` |
+| Inside Compose: Bridge, daemon, CLI login and web backend proxy | `http://backend:8080` |
+
+The browser URL is `MULTICA_APP_URL`, not the daemon API URL. The Docker
+hostname `backend` only resolves inside the Compose network; `localhost` inside
+the runtime refers to the runtime itself. Neither endpoint is a team or cloud
+Multica instance.
+
 ## Human bootstrap (not automated)
 
 From the repository root:
@@ -109,8 +125,10 @@ readiness fails, stop and inspect the failing command's output and
 )
 ```
 
-3. Copy the workspace UUID from the local UI; set the CLI profile:
-   `./e2e/run.sh workspace WORKSPACE_UUID`.
+3. Get the canonical workspace UUID from the browser UI or from
+   `./e2e/run.sh workspaces` after login (it runs
+   `multica --profile e2e workspace list --full-id` inside Compose).
+   Then set the CLI profile: `./e2e/run.sh workspace WORKSPACE_UUID`.
 4. Verify the images and binaries before starting the daemon:
 
 ```sh

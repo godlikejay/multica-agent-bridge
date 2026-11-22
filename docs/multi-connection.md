@@ -1,5 +1,7 @@
 # Multiple Multica connections in one container
 
+English | [简体中文](zh-CN/multi-connection.md)
+
 Use this mode to connect a single runtime container to multiple Multica
 services, or to make distinct connections using separate accounts on one
 service. One configuration starts one Multica Daemon per connection. These
@@ -15,16 +17,24 @@ file](deployment.md). It does not require a configuration or mailbox migration.
 At the repository root, as a regular non-root user:
 
 ```sh
-export BRIDGE_UID="$(id -u)" BRIDGE_GID="$(id -g)"
+[ -f .env ] || cp .env.example .env
+id -u
+id -g
 (umask 077; mkdir -p .bridge-multi/secrets .bridge-multi/runtime \
     .bridge-multi/inbox .bridge-multi/outbox .bridge-multi/state)
 cp -n connections.example.json .bridge-multi/connections.json
 ```
 
-Edit the copy and replace the example API and web URLs. Every connection has
-a stable local `id` and a separate `token_file` mounted read-only. Set the paths
+Save the numeric `id -u` and `id -g` outputs as `BRIDGE_UID` and `BRIDGE_GID`
+in the ignored root `.env`. Compose reads these again in fresh terminals. The
+URL fields in `.env` are only for single-connection mode; do not put tokens there.
+
+Edit `.bridge-multi/connections.json` and set each connection's HTTPS
+`server_url` (API), stable local `id`, and separate read-only `token_file`.
+An existing `app_url` remains supported as an optional upstream browser
+setting; the production token flow does not need it. Set the paths
 to files under `/run/secrets/`. In the matching Multica site, use an authorized
-account and create a PAT. Enter each token on the Docker host, not in a chat,
+account and [create a PAT](deployment.md#first-login-and-registration). Enter each token on the Docker host, not in a chat,
 environment variable, or command argument. For example, in Bash:
 
 ```bash
@@ -38,9 +48,21 @@ environment variable, or command argument. For example, in Bash:
   IFS= read -rsp 'Work Multica PAT: ' pat; printf '\n'
   printf '%s\n' "$pat" > .bridge-multi/secrets/work.pat
 )
-docker compose -f compose.multi.yaml up -d --build
+```
+
+In the root `.env`, set `BRIDGE_IMAGE=ghcr.io/godlikejay/multica-agent-bridge:latest`
+or a reviewed digest as in the [single-connection setup](deployment.md#choose-an-image).
+
+```sh
+docker compose -f compose.multi.yaml config --images
+docker compose -f compose.multi.yaml pull bridge
+docker compose -f compose.multi.yaml up -d --no-build bridge
 docker compose -f compose.multi.yaml logs --tail 100 bridge
 ```
+
+To build instead, leave `BRIDGE_IMAGE` empty in `.env`, clear any matching
+shell export, and run
+`docker compose -f compose.multi.yaml up -d --build`.
 
 Check that each intended runtime is online in its own Multica site. Bind the
 test Agent to that runtime and choose the Bridge model as in [single-connection

@@ -14,7 +14,9 @@ import uuid
 ROOT = Path(__file__).resolve().parent / '.local'
 MAIL = ROOT / 'bridge'
 API = 'http://127.0.0.1:18080'
+BROWSER = 'http://localhost:13000'
 WEB = 'http://127.0.0.1:13000'
+DOCKER_API = 'http://backend:8080'
 MARKER = 'E2E_SYNTHETIC_ONLY'
 ESCAPED_MARKER = MARKER.replace('_', r'\_')
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}')
@@ -24,7 +26,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-OPENER = urllib.request.build_opener(NoRedirect)
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
 def get(path, token=None):
     headers = {'Accept': 'application/json'}
@@ -57,9 +59,15 @@ def web_ready():
         exc.close()
         local = (destination.startswith('/') and not destination.startswith('//')
                  or destination.startswith(WEB + '/')
-                 or destination.startswith('http://localhost:13000/'))
+                 or destination.startswith(BROWSER + '/'))
         if not (300 <= exc.code < 400 and local):
             raise
+
+def print_urls(web, host_api, docker_api):
+    print(f'Browser URL (setup and test Agent UI): {web}')
+    print(f'Host API (fixture verification only):   {host_api}')
+    print(f'Docker API (Bridge / daemon login):    {docker_api}')
+
 
 def health():
     wait_ready('Backend /readyz', lambda: get('/readyz'))
@@ -195,6 +203,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='cmd', required=True)
     sub.add_parser('health')
+    sub.add_parser('urls')
     f = sub.add_parser('fixture'); f.add_argument('event'); f.add_argument('--complete', action='store_true')
     sm = sub.add_parser('smoke'); sm.add_argument('event')
     pl = sub.add_parser('parallel'); pl.add_argument('event_a'); pl.add_argument('event_b'); pl.add_argument('--finish-a', action='store_true')
@@ -202,6 +211,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     try:
         if args.cmd == 'health': health()
+        elif args.cmd == 'urls': print_urls(BROWSER, API, DOCKER_API)
         elif args.cmd == 'fixture': fixture(args.event, args.complete)
         elif args.cmd == 'smoke':
             event = read_event(args.event)

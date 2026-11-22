@@ -29,7 +29,9 @@ case "${1:-help}" in
     compose --profile runtime build proxy-a runtime
     compose up -d --no-build proxy-a proxy-b
     python3 -B fixture.py health
-    echo 'Synthetic websites: http://localhost:13100 and http://localhost:13200. See README for signup and assignment.' ;;
+    python3 -B fixture.py urls
+    echo 'See README for signup and assignment.' ;;
+  urls) python3 -B fixture.py urls ;;
   token)
     endpoint "${2:-}"
     python3 -B fixture.py token "$2" ;;
@@ -72,6 +74,6 @@ case "${1:-help}" in
     compose --profile runtime down
     echo 'Stopped only the two-service fixture. Volumes and synthetic local state retained.' ;;
   *)
-    echo 'Usage: ./e2e/multi/run.sh init|up|token a|b|runtime|versions|status a|b|workspace a|b UUID|cli a|b ...|accept A_TASK_EVENT B_TASK_EVENT|logs|down' >&2
+    echo 'Usage: ./e2e/multi/run.sh init|up|urls|token a|b|runtime|versions|status a|b|workspace a|b UUID|cli a|b ...|accept A_TASK_EVENT B_TASK_EVENT|logs|down' >&2
     exit 2 ;;
 esac

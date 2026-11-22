@@ -10,7 +10,7 @@ import (
 func TestConfigAndRoute(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "connections.json")
-	config := `{"connections":[{"id":"work","server_url":"https://WORK.example.invalid/","app_url":"https://app.example.invalid","token_file":"/run/secrets/work","workspace_ids":["ws-1"]},{"id":"cloud","server_url":"https://cloud.example.invalid","app_url":"https://cloud.example.invalid","token_file":"/run/secrets/cloud","max_active_runs":2}]}`
+	config := `{"connections":[{"id":"work","server_url":"https://WORK.example.invalid/","app_url":"https://app.example.invalid","token_file":"/run/secrets/work","workspace_ids":["ws-1"]},{"id":"cloud","server_url":"https://cloud.example.invalid","token_file":"/run/secrets/cloud","max_active_runs":2}]}`
 	put := func(data string) {
 		t.Helper()
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
@@ -25,8 +25,11 @@ func TestConfigAndRoute(t *testing.T) {
 	if got, err := cfg.Route("work", "https://work.example.invalid", "ws-1", false); err != nil || got.MaxActiveRuns != 4 {
 		t.Fatalf("trusted route: %#v / %v", got, err)
 	}
-	if _, err := cfg.Route("cloud", "https://cloud.example.invalid/", "other-workspace", false); err != nil {
-		t.Fatal(err)
+	if got, err := cfg.Route("cloud", "https://cloud.example.invalid/", "other-workspace", false); err != nil || got.AppURL != "" {
+		t.Fatalf("API-only route: %#v / %v", got, err)
+	}
+	if cfg.Connections[0].AppURL != "https://app.example.invalid" {
+		t.Fatal("lost explicit upstream browser URL")
 	}
 	for _, broken := range []struct{ id, endpoint, workspace string }{
 		{"work", "https://cloud.example.invalid", "ws-1"},
@@ -47,6 +50,7 @@ func TestConfigAndRoute(t *testing.T) {
 		strings.Replace(config, "ws-1", strings.Repeat("w", 101), 1),
 		strings.Replace(config, `"/run/secrets/work"`, `"relative"`, 1),
 		strings.Replace(config, `"https://WORK.example.invalid/"`, `"https://user:abc@work.example.invalid?secret=abc"`, 1),
+		strings.Replace(config, "https://app.example.invalid", "http://localhost:13100", 1),
 		strings.Replace(config, `"max_active_runs":2`, `"max_active_runs":-1`, 1),
 		strings.Replace(config, `"max_active_runs":2`, `"key":"abc"`, 1),
 		config + "null",

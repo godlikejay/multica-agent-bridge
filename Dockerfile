@@ -9,6 +9,8 @@ RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -o /multica-bridge ./cmd/mu
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates git
 COPY --from=upstream /app/multica /usr/local/bin/multica
+COPY --from=upstream /app/LICENSE /app/NOTICE /usr/share/licenses/multica/
+COPY LICENSE /usr/share/licenses/multica-agent-bridge/LICENSE
 COPY --from=builder /multica-bridge /usr/local/bin/multica-bridge
 ENV HOME=/home/runtime BRIDGE_ROOT=/bridge MULTICA_HERMES_PATH=/usr/local/bin/multica-bridge MULTICA_DAEMON_MAX_CONCURRENT_TASKS=4
 RUN addgroup -g 10001 bridge \

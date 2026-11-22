@@ -3,14 +3,12 @@
     {
       "id": "cloud",
       "server_url": "https://api.multica.ai",
-      "app_url": "https://app.multica.ai",
       "token_file": "/run/secrets/cloud.pat",
       "max_active_runs": 4
     },
     {
       "id": "work",
       "server_url": "https://api.work.example.invalid",
-      "app_url": "https://multica.work.example.invalid",
       "token_file": "/run/secrets/work.pat",
       "max_active_runs": 4
     }
