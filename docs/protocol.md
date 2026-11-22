@@ -32,7 +32,12 @@ ACP prompt. An event is an observation, not permission to act.
 - `task`: initial snapshot for the run; `issue_key` and `body` hold display
   metadata and issue text.
 - `comment`: `source_id`, `revision`, `body` for a newly observed comment
-  version. No deletion events or audit completeness guarantees in this build.
+  version. When Multica assigns it to this Run, `run_input` is `trigger` or
+  `coalesced`. The Daemon claim receipt (`delivered_comment_ids`) is authoritative
+  even when empty. Only responses without it fall back to planned trigger and
+  coalesced IDs. Run inputs are emitted even if seen as context earlier;
+  ordinary context is deduplicated across Runs. No deletion events or audit
+  completeness guarantees in this build.
 - `receipt`: `request_id`, `status`, and `remote_id` when a posted comment
   was verified. Receipt status describes what the Bridge knows, not the entire
   remote Run state.

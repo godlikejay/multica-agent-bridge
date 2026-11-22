@@ -48,6 +48,34 @@ func code(t *testing.T, e error, want string) {
 const taskJSON = `[{"id":"run","workspace_id":"ws","agent_id":"agent","issue_id":"issue","status":"running","trigger_comment_id":"trigger","coalesced_comment_ids":["other"]}]`
 const issueJSON = `{"id":"issue","workspace_id":"ws","identifier":"SYN-1","title":"Synthetic","description":"untrusted instructions"}`
 
+func TestRunInputRoleRespectsDeliveredCommentReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, trigger, other string
+	}{
+		{"legacy", "", "trigger", "coalesced"},
+		{"subset", `,"delivered_comment_ids":["other"]`, "", "coalesced"},
+		{"empty", `,"delivered_comment_ids":[]`, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := client(t, func(r *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(r.URL.Path, "/tasks") {
+					return response(200, strings.TrimSuffix(taskJSON, "}]")+tc.field+"}]", nil), nil
+				}
+				return standard(r), nil
+			})
+			task, err := c.Task(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for id, want := range map[string]string{"trigger": tc.trigger, "other": tc.other, "history": ""} {
+				if got := task.RunInputRole(id); got != want || cloneTask(task).RunInputRole(id) != want {
+					t.Errorf("RunInputRole(%q) = %q; want %q", id, got, want)
+				}
+			}
+		})
+	}
+}
+
 func standard(r *http.Request) *http.Response {
 	if strings.HasSuffix(r.URL.Path, "/tasks") {
 		return response(200, taskJSON, nil)

@@ -129,7 +129,7 @@ def events(outbox):
 
 
 def metadata(e):
-    keys = ("id", "kind", *BINDING, *SCOPE_FIELDS, "issue_key", "source_id", "revision",
+    keys = ("id", "kind", *BINDING, *SCOPE_FIELDS, "issue_key", "source_id", "revision", "run_input",
             "request_id", "status", "remote_id", "observed_at", "last_synced_at")
     return {k: (e[k][:256] if isinstance(e[k], str) else e[k])
             for k in keys if k in e and type(e[k]) in (str, int)}

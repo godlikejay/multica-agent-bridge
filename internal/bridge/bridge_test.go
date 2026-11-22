@@ -134,6 +134,115 @@ func TestManualRoundTripAndRestart(t *testing.T) {
 		t.Fatal("stale or replayed request was posted")
 	}
 }
+
+type followUpRemote struct {
+	fake
+	trigger   string
+	parents   []string
+	delivered []string
+}
+
+func (f *followUpRemote) Task(ctx context.Context) (multica.Task, error) {
+	task, err := f.fake.Task(ctx)
+	task.TriggerCommentID, task.AllowedParents = f.trigger, f.parents
+	task.DeliveredCommentIDs = f.delivered
+	return task, err
+}
+
+func (*followUpRemote) Comments(context.Context, string) ([]multica.Comment, error) {
+	return []multica.Comment{
+		{ID: "history", Revision: "1", Body: "Note only"},
+		{ID: "follow-up-1", Revision: "1", Body: "Earlier queued message"},
+		{ID: "follow-up-2", Revision: "1", Body: "Latest queued message"},
+	}, nil
+}
+
+func TestFollowUpInputsSurviveRunHandoff(t *testing.T) {
+	for _, reason := range []string{"complete", "cancel"} {
+		t.Run(reason, func(t *testing.T) {
+			box := mailbox.Box{Root: t.TempDir()}
+			oldRemote := &followUpRemote{}
+			_, oldErr, cancel := run(t, box, oldRemote, "run-1")
+			old := task(t, box, "run-1")
+			for _, id := range []string{"history", "follow-up-1", "follow-up-2"} {
+				await(t, box, func(m mailbox.Message) bool {
+					return m.Kind == "comment" && m.RunID == old.RunID && m.SourceID == id && m.RunInput == ""
+				})
+			}
+			if reason == "complete" {
+				input(t, box, old, "done-1", "complete", "Finish prior Run")
+				receipt(t, box, "done-1", "completion_requested")
+				if err := <-oldErr; err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				cancel()
+				if err := <-oldErr; !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+			}
+
+			remote := &followUpRemote{
+				trigger:   "follow-up-2",
+				parents:   []string{"follow-up-2", "follow-up-1", "history"},
+				delivered: []string{"follow-up-2", "follow-up-1"},
+			}
+			_, nextErr, stop := run(t, box, remote, "run-2")
+			next := task(t, box, "run-2")
+			if next.Epoch != old.Epoch+1 {
+				t.Fatalf("next epoch is %d; want %d", next.Epoch, old.Epoch+1)
+			}
+			sourceRoles := map[string]string{"follow-up-1": "coalesced", "follow-up-2": "trigger"}
+			for id, role := range sourceRoles {
+				await(t, box, func(m mailbox.Message) bool {
+					return m.Kind == "comment" && m.RunID == next.RunID && m.Epoch == next.Epoch &&
+						m.SourceID == id && m.RunInput == role
+				})
+			}
+			input(t, box, old, "stale-1", "reply", "Must not cross Runs")
+			receipt(t, box, "stale-1", "stale")
+			input(t, box, next, "reply-2", "reply", "Reply to the follow-up")
+			receipt(t, box, "reply-2", "reply_posted")
+			if remote.count() != 1 {
+				t.Fatal("expected only the new Run's reply")
+			}
+			stop()
+			if err := <-nextErr; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			_, resumedErr, stopResumed := run(t, box, remote, "run-2")
+			input(t, box, next, "reply-3", "reply", "After daemon retry")
+			receipt(t, box, "reply-3", "reply_posted")
+			stopResumed()
+			if err := <-resumedErr; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+
+			files, err := filepath.Glob(filepath.Join(box.Root, "outbox", "*.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			counts := map[string]int{}
+			for _, file := range files {
+				var m mailbox.Message
+				raw, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(raw, &m); err != nil {
+					t.Fatal(err)
+				}
+				if m.Kind == "comment" && m.RunID == next.RunID {
+					counts[m.SourceID]++
+				}
+			}
+			if len(counts) != 2 || counts["follow-up-1"] != 1 || counts["follow-up-2"] != 1 {
+				t.Fatalf("background history or delivery repeated in next Run: %v", counts)
+			}
+		})
+	}
+}
+
 func TestUncertainWriteStopsFurtherSubmission(t *testing.T) {
 	box := mailbox.Box{Root: t.TempDir()}
 	r := &fake{postErr: errors.New("lost response")}

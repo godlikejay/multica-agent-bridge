@@ -117,6 +117,14 @@ class MailboxCLI(unittest.TestCase):
         self.event("receipt-1", "receipt", request_id="request-1", status="reply_posted", remote_id="remote-1")
         self.assertEqual(self.invoke("receipt", "request-1")[0]["remote_id"], "remote-1")
 
+    def test_follow_up_comment_metadata_is_scoped_to_its_run(self):
+        self.event("follow-up", "comment", run_id="run-2", epoch=2,
+                   source_id="source-1", run_input="trigger", body="New run's message")
+        rows = self.invoke("list", "--unread", "--run-id", "run-2")
+        self.assertEqual([(e["source_id"], e["run_input"]) for e in rows], [("source-1", "trigger")])
+        self.assertEqual(self.invoke("read", "follow-up")["body"], "New run's message")
+        self.assertNotIn("run_input", self.invoke("read", "comment-1"))
+
     def test_draft_not_live_and_no_controlling_tty(self):
         d, path = self.make_draft()
         self.assertEqual(d["event_id"], "comment-1")

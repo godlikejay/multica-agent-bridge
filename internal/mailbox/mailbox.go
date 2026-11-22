@@ -41,6 +41,7 @@ type Message struct {
 	IssueKey     string `json:"issue_key,omitempty"`
 	SourceID     string `json:"source_id,omitempty"`
 	Revision     string `json:"revision,omitempty"`
+	RunInput     string `json:"run_input,omitempty"`
 	ParentID     string `json:"parent_id,omitempty"`
 	RequestID    string `json:"request_id,omitempty"`
 	Status       string `json:"status,omitempty"`
@@ -313,7 +314,7 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if m.Kind != "reply" && m.Kind != "complete" {
 			continue
 		}
-		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" {
+		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" {
 			continue
 		}
 		results = append(results, Input{m, ID(string(raw))})

@@ -189,7 +189,14 @@ poll:
 			if own {
 				continue
 			}
-			k := mailbox.ID("source", c.ID, c.Revision, c.Body)
+			source := mailbox.ID("source", c.ID, c.Revision, c.Body)
+			k := source
+			role := t.RunInputRole(c.ID)
+			if role != "" {
+				// A comment observed by an earlier run can still be an explicit
+				// input of this run. Keep a separate immutable delivery record.
+				k = mailbox.ID("run-input", b.RunID, role, source)
+			}
 			if s.Seen[k] != "" {
 				continue
 			}
@@ -198,11 +205,13 @@ poll:
 			m.ID = mailbox.ID("comment", t.IssueID, b.RunID, k)
 			m.SourceID = c.ID
 			m.Revision = c.Revision
+			m.RunInput = role
 			m.Body = c.Body
 			if err = b.Box.Emit(m); err != nil {
 				return "", err
 			}
 			s.Seen[k] = m.ID
+			s.Seen[source] = m.ID
 			if err = b.Box.Save(s); err != nil {
 				return "", err
 			}

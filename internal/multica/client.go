@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,8 +41,25 @@ func (c Config) GoString() string { return c.String() }
 type Task struct {
 	IssueID, IssueKey, Title, Description, TriggerCommentID, AgentID string
 	AllowedParents                                                   []string
+	DeliveredCommentIDs                                              []string
 }
 type Comment struct{ ID, IssueID, Body, Revision, AuthorID, AuthorType, SourceTaskID, ParentID, DeletedAt string }
+
+// RunInputRole consults the claim receipt when available. An empty delivered
+// list is authoritative; only older responses fall back to the planned IDs.
+func (t Task) RunInputRole(id string) string {
+	if t.DeliveredCommentIDs != nil {
+		if !slices.Contains(t.DeliveredCommentIDs, id) {
+			return ""
+		}
+	} else if id != t.TriggerCommentID && !slices.Contains(t.AllowedParents, id) {
+		return ""
+	}
+	if id == t.TriggerCommentID {
+		return "trigger"
+	}
+	return "coalesced"
+}
 
 // Error deliberately contains neither server bodies, request URLs nor credentials.
 // Ambiguous means a POST may have reached the server. Callers must reconcile the
@@ -194,10 +212,15 @@ type wireTask struct {
 	RuntimeID   string   `json:"runtime_id"`
 	Trigger     string   `json:"trigger_comment_id"`
 	Parents     []string `json:"coalesced_comment_ids"`
+	Delivered   []string `json:"delivered_comment_ids"`
 	Restricted  bool     `json:"restricted"`
 }
 
-func cloneTask(t Task) Task { t.AllowedParents = append([]string(nil), t.AllowedParents...); return t }
+func cloneTask(t Task) Task {
+	t.AllowedParents = slices.Clone(t.AllowedParents)
+	t.DeliveredCommentIDs = slices.Clone(t.DeliveredCommentIDs)
+	return t
+}
 
 // Task resolves the exact injected RunID; prompts are never parsed for identity.
 func (c *Client) Task(ctx context.Context) (Task, error) {
@@ -248,7 +271,12 @@ func (c *Client) Task(ctx context.Context) (Task, error) {
 			if !validID(t.IssueID) {
 				return Task{}, fail("unsupported_task")
 			}
-			task := Task{IssueID: t.IssueID, TriggerCommentID: t.Trigger, AgentID: t.AgentID}
+			task := Task{IssueID: t.IssueID, TriggerCommentID: t.Trigger, AgentID: t.AgentID, DeliveredCommentIDs: t.Delivered}
+			for _, id := range task.DeliveredCommentIDs {
+				if !validID(id) {
+					return Task{}, fail("invalid_response")
+				}
+			}
 			parents := map[string]bool{}
 			for _, p := range append([]string{t.Trigger}, t.Parents...) {
 				if p == "" {
