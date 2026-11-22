@@ -31,7 +31,12 @@ images or block direct pushes; a failed check is reported on the commit.
   completion. Record upstream version, command and outcome. Fixture success
   alone is not proof of a real Run.
 
-Image publication is a separate workflow.
+PRs and feature branch pushes validate only. On `main`, the same three
+checks must pass for the exact commit before CI calls the image publisher.
+Automatic publication is limited to image inputs; test-only changes run the
+checks without rebuilding. To request a rebuild, run the Regression workflow
+manually on `main`; it still requires all three checks. This is a release
+gate, not a change to branch protection.
 
 When upgrading Multica, update the pinned upstream images in `Dockerfile` and
 `e2e/compose.yaml` together. Check the task API and ACP contract against the new

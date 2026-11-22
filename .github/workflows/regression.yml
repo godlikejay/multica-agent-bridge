@@ -4,6 +4,8 @@ on:
   pull_request:
     paths: &regression_paths
       - '.github/workflows/regression.yml'
+      - '.github/workflows/container.yml'
+      - '.github/scripts/image-inputs.sh'
       - '.dockerignore'
       - 'Dockerfile'
       - 'LICENSE'
@@ -54,3 +56,38 @@ jobs:
         with:
           persist-credentials: false
       - run: make container-smoke
+
+  image-inputs:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: compare
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT" == workflow_dispatch ]]; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          elif bash .github/scripts/image-inputs.sh "$BASE_SHA" "$GITHUB_SHA"; then
+            echo changed=false >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" != 1 ]]; then exit "$status"; fi
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: [offline, docker-e2e, container-smoke, image-inputs]
+    if: github.ref == 'refs/heads/main' && needs.image-inputs.outputs.changed == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/container.yml

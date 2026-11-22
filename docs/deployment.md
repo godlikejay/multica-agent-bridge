@@ -35,5 +35,7 @@ The [image workflow](../.github/workflows/container.yml) publishes Linux
 amd64 and arm64 images as `latest` and `sha-<full-git-commit>`. Use a reviewed
 digest when the deployed image must be reproducible.
 
-Publishes only for changes to the Docker build inputs or the workflow on `main`.
-To rebuild the same source, run it manually on `main`.
+The [Regression workflow](../.github/workflows/regression.yml) calls the
+publisher only on `main` after all three checks pass for the same commit.
+Docker build inputs and the publisher trigger automatic builds; test-only
+changes do not. To rebuild, run **Regression** manually on `main`.

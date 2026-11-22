@@ -31,4 +31,4 @@ printf 'BRIDGE_UID=%s\nBRIDGE_GID=%s\nBRIDGE_IMAGE=multica-agent-bridge:local\n'
 [镜像构建流程](../../.github/workflows/container.yml)发布 Linux amd64 和 arm64 版本，
 提供 `latest` 和 `sha-<完整提交哈希>` 标签。需要精确锁定时，使用已核验的镜像 digest。
 
-只有 `main` 上的镜像构建输入或工作流改动会自动打包，也可以在 `main` 上手动触发。
+[Regression 工作流](../../.github/workflows/regression.yml)仅在 `main` 上同一次提交的三项回归全部通过后调用镜像发布。镜像构建输入或发布工作流改动才自动打包，纯测试改动不打包。要手动重打，请在 `main` 上运行 **Regression**。
