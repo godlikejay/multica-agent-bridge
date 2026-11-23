@@ -86,7 +86,7 @@ services:
     volumes:
       - ./.local/home:/home/runtime
       - ./.local/workspaces:/workspaces
-      - ./.local/bridge/inbox:/bridge/inbox:ro
+      - ./.local/bridge/inbox:/bridge/inbox
       - ./.local/bridge/outbox:/bridge/outbox
       - ./.local/bridge/state:/bridge/state
 networks:

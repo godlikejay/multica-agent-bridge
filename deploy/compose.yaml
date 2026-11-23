@@ -30,7 +30,6 @@ services:
       - type: bind
         source: "${BRIDGE_DATA_DIR:-./data}/inbox"
         target: /bridge/inbox
-        read_only: true
         bind: {create_host_path: false}
       - type: bind
         source: "${BRIDGE_DATA_DIR:-./data}/outbox"

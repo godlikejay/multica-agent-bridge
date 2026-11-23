@@ -126,3 +126,7 @@ exec docker compose --project-directory "$install_dir" \
 默认配置是 `connections.json`，令牌在 `secrets/`，邮箱和运行状态在 `data/`。可以在 `.env` 用 `BRIDGE_CONFIG`、`BRIDGE_SECRETS_DIR`、`BRIDGE_DATA_DIR` 改位置；先在宿主机建好目录。如果要让 Agent 提交你明确授权的普通回复，只给它必要的邮箱读写权限，不要给它令牌或 daemon 登录目录的权限。[Agent 接入指南](../docs/zh-CN/agent-integration.md)说明如何一次配置路径和确认回复。
 
 确认没有正在跑的任务后，`docker compose pull && docker compose up -d` 更新镜像。想锁定版本可在 `.env` 用 `BRIDGE_IMAGE` 指定镜像 digest。保留 `data/runtime` 和 `data/state`。同一账号更换令牌时，更新文件，等正在跑的 Run 结束后执行 `docker compose restart bridge`。换账号或服务则用新的连接 ID，不搬运未处理的请求。互不信任的环境用各自的容器、目录和令牌。
+
+升级时一并更新 Compose 配置。Bridge 需要写入 Inbox 挂载目录，才能删除已确认送达的请求；容器根文件系统、配置和令牌仍为只读。Inbox 是待发送队列，不保存已发送正文，历史以 Multica 为准。
+
+不迁移旧邮箱。如果是早期的一次性测试实例，先在 Multica 确认没有活跃 Run，并检查本地没有待发或结果不明的请求。停容器后，可以把旧 Inbox 和 Outbox 移出挂载位置作为备份，再按原权限创建空目录。保留运行身份和防重状态；清空邮箱不等于清空防重状态。

@@ -105,6 +105,20 @@ started=1
 compose up -d bridge
 container=$(compose ps -q bridge)
 [ -n "$container" ] || { echo 'Supervisor container did not start.' >&2; exit 1; }
+docker inspect "$container" > "$fixture/container.json"
+python3 - "$fixture/container.json" <<'PYTEST'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as info:
+    container, = json.load(info)
+mounts = {mount["Destination"]: mount["RW"] for mount in container["Mounts"]}
+if not (container["HostConfig"]["ReadonlyRootfs"] is True
+        and mounts.get("/bridge/inbox") is True
+        and mounts.get("/etc/multica-bridge/connections.json") is False
+        and mounts.get("/run/secrets") is False):
+    raise SystemExit("Expected writable Inbox and read-only root, config and secrets.")
+PYTEST
 wait_status alpha=True:retrying beta=True:retrying
 # Both mounts must accept their per-connection binding before the missing PAT.
 for mount in runtime state; do

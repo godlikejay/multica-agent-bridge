@@ -93,6 +93,95 @@ func task(t *testing.T, b mailbox.Box, run string) mailbox.Message {
 func receipt(t *testing.T, b mailbox.Box, req, status string) mailbox.Message {
 	return await(t, b, func(m mailbox.Message) bool { return m.Kind == "receipt" && m.RequestID == req && m.Status == status })
 }
+func waitRemoved(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("not removed: %s", filepath.Base(path))
+}
+
+func TestAcknowledgedCommentIsNotReplayed(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	r := new(fake)
+	_, errs, stop := run(t, box, r, "run-1")
+	a := task(t, box, "run-1")
+	c := await(t, box, func(m mailbox.Message) bool { return m.Kind == "comment" })
+	outbox := filepath.Join(box.Root, "outbox")
+	ackDir := filepath.Join(outbox, ".acks", a.IssueID)
+	if err := os.MkdirAll(ackDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(ackDir, c.ID+".ack")
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A task marker is not eligible for pruning.
+	if err := os.WriteFile(filepath.Join(ackDir, a.ID+".ack"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	event := filepath.Join(outbox, c.ID+".json")
+	waitRemoved(t, event)
+	waitRemoved(t, marker)
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	_, errs, stop = run(t, box, r, "run-1")
+	task(t, box, "run-1")
+	input(t, box, a, "reply-after-ack", "reply", "fixture")
+	receipt(t, box, "reply-after-ack", "reply_posted")
+	if _, err := os.Stat(event); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("acknowledged comment returned: %v", err)
+	}
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestInboxCleanupAfterRestartUsesExactSavedDigest(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	r := new(fake)
+	_, errs, stop := run(t, box, r, "run-1")
+	base := task(t, box, "run-1")
+	inDir := filepath.Join(box.Root, "inbox", base.IssueID)
+	input(t, box, base, "ok", "reply", "delivered reply")
+	ok := filepath.Join(inDir, "ok.json")
+	receipt(t, box, "ok", "reply_posted")
+	waitRemoved(t, ok)
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	// Simulate restart with a replacement file at the same name.
+	input(t, box, base, "ok", "reply", "different bytes")
+	_, errs, stop = run(t, box, r, "run-1")
+	receipt(t, box, "ok", "id_conflict")
+	if _, err := os.Stat(ok); err != nil {
+		t.Fatal("conflicting request was discarded", err)
+	}
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	// Then simulate the same request remaining after the recorded post.
+	input(t, box, base, "ok", "reply", "delivered reply")
+	_, errs, stop = run(t, box, r, "run-1")
+	waitRemoved(t, ok)
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if r.count() != 1 {
+		t.Fatal("already delivered request was posted again")
+	}
+}
+
 func TestManualRoundTripAndRestart(t *testing.T) {
 	box := mailbox.Box{Root: t.TempDir()}
 	r := new(fake)
@@ -129,6 +218,10 @@ func TestManualRoundTripAndRestart(t *testing.T) {
 	}
 	if e := <-errs; e != nil {
 		t.Fatal(e)
+	}
+	waitRemoved(t, filepath.Join(box.Root, "inbox", b.IssueID, "done.json"))
+	if _, err := os.Stat(filepath.Join(box.Root, "inbox", a.IssueID, "old-complete.json")); err != nil {
+		t.Fatal("stale request was discarded", err)
 	}
 	if r.count() != 2 {
 		t.Fatal("stale or replayed request was posted")
@@ -253,6 +346,11 @@ func TestUncertainWriteStopsFurtherSubmission(t *testing.T) {
 	receipt(t, box, "attempt", "delivery_uncertain")
 	input(t, box, a, "finish", "complete", "must not post")
 	receipt(t, box, "finish", "blocked_uncertain")
+	for _, id := range []string{"attempt", "finish"} {
+		if _, err := os.Stat(filepath.Join(box.Root, "inbox", a.IssueID, id+".json")); err != nil {
+			t.Fatalf("unsettled request %s was discarded: %v", id, err)
+		}
+	}
 	if r.count() != 1 {
 		t.Fatal("post repeated or completion slipped through")
 	}
@@ -581,6 +679,7 @@ func TestLostFinalCommentReconcilesAcrossReplacementWithoutCompleting(t *testing
 
 	r2.snapshotAfter([]multica.Comment{exact}, nil)
 	confirmed := receipt(t, box, "maybe-final", "delivery_confirmed")
+	waitRemoved(t, filepath.Join(box.Root, "inbox", a.IssueID, "maybe-final.json"))
 	if confirmed.ID == original.ID || confirmed.RunID != a.RunID || confirmed.Epoch != a.Epoch || confirmed.RemoteID != exact.ID {
 		t.Fatalf("invalid reconciliation receipt: %+v", confirmed)
 	}

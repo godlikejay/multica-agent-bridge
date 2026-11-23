@@ -468,6 +468,74 @@ def update_pickup(root_fd, scope, issue, mutate):
         os.close(directory)
 
 
+def publish_comment_ack(outbox, event):
+    directory = scoped_dir(outbox.directory, ".acks", (event["issue_id"],), create=True)
+    try:
+        name = event["id"] + ".ack"
+        try:
+            # An empty marker is complete at creation; there is no partial
+            # payload for the Bridge to read.
+            marker = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        except FileExistsError:
+            try:
+                marker = os.open(name, FILE_FLAGS, dir_fd=directory)
+            except FileNotFoundError:
+                # Bridge may have concurrently consumed the existing ack.
+                return
+        try:
+            info = os.fstat(marker)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+                raise MailboxError("comment acknowledgement must be an empty regular file")
+            os.fsync(marker)
+        finally:
+            os.close(marker)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def prior_ack_issue(root_fd, scope, event_id):
+    directory = pickup_dir(root_fd, scope)
+    if directory is None:
+        return None
+    try:
+        with os.scandir(directory) as entries:
+            issues = []
+            for entry in entries:
+                if entry.name.endswith(".json") and valid_id(entry.name[:-5]):
+                    issue = entry.name[:-5]
+                    if event_id in read_pickup(directory, issue)["acknowledged"]:
+                        issues.append(issue)
+            if len(issues) > 1:
+                raise MailboxError("acknowledged event ID is ambiguous")
+            return issues[0] if issues else None
+    finally:
+        os.close(directory)
+
+
+def acknowledge_event(root_fd, outbox, event_id):
+    try:
+        event = load_event(outbox, event_id)
+    except FileNotFoundError:
+        issue = prior_ack_issue(root_fd, outbox.scope, event_id)
+        if issue is None:
+            raise
+        return issue
+    if event["kind"] not in UNREAD_KINDS:
+        raise MailboxError("only task/comment events can be acknowledged")
+
+    def acknowledge(state):
+        if event["id"] not in state["acknowledged"]:
+            state["acknowledged"].append(event["id"])
+
+    update_pickup(root_fd, outbox.scope, event["issue_id"], acknowledge)
+    if event["kind"] == "comment":
+        verify_scope_directory(root_fd, "outbox", outbox.scope, outbox.directory)
+        publish_comment_ack(outbox, event)
+    return event["issue_id"]
+
+
 def pickup_status(outbox, directory, issue):
     state = read_pickup(directory, issue)
     acked = set(state["acknowledged"])
@@ -993,14 +1061,9 @@ def run(args):
                 run_id = require_id(args.run_id) if args.run_id is not None else None
                 emit(lookup_receipts(outbox, require_id(args.request_id), issue, run_id))
             elif args.command == "ack":
-                event = load_event(outbox, args.event_id)
-                if event["kind"] not in UNREAD_KINDS:
-                    raise MailboxError("only task/comment events can be acknowledged")
-                def acknowledge(state):
-                    if event["id"] not in state["acknowledged"]:
-                        state["acknowledged"].append(event["id"])
-                update_pickup(root_fd, scope, event["issue_id"], acknowledge)
-                emit({**scope_fields(scope), "issue_id": event["issue_id"], "event_id": event["id"], "status": "acknowledged_locally"})
+                issue = acknowledge_event(root_fd, outbox, args.event_id)
+                emit({**scope_fields(scope), "issue_id": issue, "event_id": args.event_id,
+                      "status": "acknowledged_locally"})
             elif args.command in {"status", "pickup"}:
                 issue = require_id(args.issue_id)
                 if args.command == "pickup" and (args.worktree is not None or args.draft is not None

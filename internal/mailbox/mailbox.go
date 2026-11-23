@@ -104,7 +104,7 @@ func (b Box) Init() error {
 	for _, kind := range []string{"inbox", "outbox", "state"} {
 		base := filepath.Join(b.Root, kind)
 		if kind == "inbox" && b.Connection != "" {
-			// Inbox is a read-only bind mount. The operator creates its scopes.
+			// The operator creates Inbox scopes when publishing requests.
 			if err := realDir(base); err != nil {
 				return err
 			}
@@ -320,6 +320,128 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		results = append(results, Input{m, ID(string(raw))})
 	}
 	return results, nil
+}
+
+// RemoveDelivered removes only the bytes the bridge actually accepted. The
+// Inbox directory lock is shared with the host submitter, not held during I/O
+// to Multica. An absent or replaced request is not an instruction to delete.
+func (b Box) RemoveDelivered(issueID, requestID, digest string) error {
+	if !validID.MatchString(issueID) || !validID.MatchString(requestID) || digest == "" {
+		return errors.New("invalid delivered request identity")
+	}
+	dir := filepath.Join(b.dir("inbox"), issueID)
+	shelf, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer shelf.Close()
+	if err := syscall.Flock(int(shelf.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	current, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	locked, err := shelf.Stat()
+	if err != nil || !os.SameFile(current, locked) {
+		return errors.New("inbox issue shelf changed before cleanup")
+	}
+	name := requestID + ".json"
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > MaxFile {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, MaxFile+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > MaxFile || ID(string(raw)) != digest {
+		return nil
+	}
+	current, err = root.Lstat(name)
+	if err != nil || !os.SameFile(info, current) {
+		return err
+	}
+	if err := root.Remove(name); err != nil {
+		return err
+	}
+	return shelf.Sync()
+}
+
+// PruneAcknowledgedComments is called only after Seen is durable, so a
+// crash after unlinking a comment cannot cause it to be delivered again.
+func (b Box) PruneAcknowledgedComments(issueID string, seen map[string]string) error {
+	if !validID.MatchString(issueID) {
+		return errors.New("invalid acknowledgment issue id")
+	}
+	base := filepath.Join(b.dir("outbox"), ".acks")
+	for _, dir := range []string{base, filepath.Join(base, issueID)} {
+		if err := realDir(dir); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
+	root, err := os.OpenRoot(b.dir("outbox"))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	dir := filepath.Join(".acks", issueID)
+	entries, err := os.ReadDir(filepath.Join(b.dir("outbox"), dir))
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	eligible := make(map[string]bool, len(seen))
+	for _, id := range seen {
+		eligible[id] = true
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".ack")
+		if !ok || !eligible[id] || !validID.MatchString(id) || e.Type() != 0 {
+			continue
+		}
+		name := id + ".json"
+		if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := syncDir(b.dir("outbox")); err != nil {
+			return err
+		}
+		if err := root.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return syncDir(filepath.Join(b.dir("outbox"), dir))
 }
 
 func atomicJSON(path string, v any) error {

@@ -2,9 +2,11 @@
 
 `BRIDGE_ROOT` is an absolute local path, normally the install directory’s
 `data/`. The mailbox tool writes authorized requests to the inbox; the
-Bridge writes the outbox and private state. Use a local filesystem with atomic rename and advisory file
-locking; network/sync folders are not supported. Do not let an untrusted
-process write to the mailbox, especially the inbox.
+Bridge reads and cleans settled requests from the inbox, and writes the
+outbox and private state. Use a local filesystem with atomic rename and
+advisory file locking; network/sync folders are not supported. Do not let an
+untrusted process write to the mailbox, especially the inbox. Mailbox files
+are for delivery, not an archive; consult Multica for remote history.
 
 The [runtime](../deploy/README.md) uses these paths, even for one connection:
 `inbox/<connection_id>/<workspace_id>/<issue_id>/<request_id>.json`,
@@ -48,6 +50,14 @@ ACP prompt. An event is an observation, not permission to act.
   recovery stopped. `observed_at` and `last_synced_at` are UTC timestamps at the
   transition, not a live heartbeat. The Outbox doesn't grow on every poll.
 
+An explicit local `ack EVENT_ID` allows the Bridge to remove a comment
+after it has recorded delivery in private state. The Bridge consumes the
+acknowledgment while an Issue worker is running (including on a later Run).
+Reading or listing does not acknowledge anything. Submit any requested direct
+reply before acknowledging its source comment. Active task snapshots, sync
+and action receipts still support routing, status and delivery recovery;
+they are not pruned by comment acknowledgment.
+
 ## Inbox
 
 Copy the binding from the active task event; never infer it from issue text.
@@ -61,6 +71,14 @@ must be allowed by the bound run; if omitted a triggering comment is used when
 applicable. `complete` posts the final summary and asks ACP to finish normally;
 it does not modify Issue status. Neither action interprets body text as code.
 Use a nonblank body of at most 32 KiB.
+
+For a confirmed reply or final comment, the Bridge persists its delivery
+result and publishes a receipt before removing the exact matching Inbox file.
+A later positive reconciliation can also settle the original request. An interrupted
+cleanup must not resend the request. Failed, unresolved, or conflicting
+requests are not automatically discarded. In particular, a confirmed final
+comment is not proof that Multica finished the Run: use Multica's status for
+that exact Run, not the presence of a newer Run.
 
 Receipt statuses:
 

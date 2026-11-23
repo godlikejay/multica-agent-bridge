@@ -33,7 +33,6 @@ services:
       - type: bind
         source: ./.bridge-multi/inbox
         target: /bridge/inbox
-        read_only: true
         bind: {create_host_path: false}
       - type: bind
         source: ./.bridge-multi/outbox

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -105,7 +106,21 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	if err = b.Box.PruneAcknowledgedComments(s.IssueID, s.Seen); err != nil {
+		return "", err
+	}
 	if s.Completion != "" {
+		inputs, err := b.Box.Inputs(s.IssueID)
+		if err != nil {
+			return "", err
+		}
+		for _, in := range inputs {
+			if err := b.cleanupDelivered(&s, in); err != nil {
+				// Delivery has already been persisted. Cleanup failure must
+				// neither imply a new send nor prevent ACP completion.
+				log.Print("bridge: delivered Inbox cleanup deferred")
+			}
+		}
 		return s.Completion, nil
 	}
 	base := mailbox.Message{Version: 1, IssueID: t.IssueID, RunID: b.RunID, Epoch: s.Epoch}
@@ -211,10 +226,15 @@ poll:
 				return "", err
 			}
 			s.Seen[k] = m.ID
-			s.Seen[source] = m.ID
+			if s.Seen[source] == "" {
+				s.Seen[source] = m.ID
+			}
 			if err = b.Box.Save(s); err != nil {
 				return "", err
 			}
+		}
+		if err = b.Box.PruneAcknowledgedComments(s.IssueID, s.Seen); err != nil {
+			return "", err
 		}
 		now := time.Now().UTC()
 		lastSync, _ := time.Parse(time.RFC3339Nano, s.LastSyncedAt)
@@ -264,6 +284,11 @@ poll:
 				}
 				return "", err
 			}
+			if err := b.cleanupDelivered(&s, in); err != nil {
+				// Delivery has already been persisted. Cleanup failure must
+				// neither imply a new send nor prevent ACP completion.
+				log.Print("bridge: delivered Inbox cleanup deferred")
+			}
 			if done {
 				return s.Completion, nil
 			}
@@ -288,6 +313,9 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	var intent *mailbox.SendIntent
 	put := func(status string) error {
 		receipt.Status = status
+		if receipt.RemoteID != "" {
+			intent = nil // Correlation is only needed until the comment is confirmed.
+		}
 		s.Actions[m.ID] = mailbox.Action{Digest: in.Digest, Receipt: receipt, Intent: intent}
 		return b.Box.Save(*s)
 	}
@@ -426,6 +454,28 @@ func (b Bridge) setSync(s *mailbox.State, base mailbox.Message, status string) e
 	return b.Box.Emit(base)
 }
 
+// The caller has already persisted and emitted the receipt. Completion
+// requested confirms only the comment: Completion is retained for ACP replay.
+func (b Bridge) cleanupDelivered(s *mailbox.State, in mailbox.Input) error {
+	m := in.Message
+	a, ok := s.Actions[m.ID]
+	if !ok || a.Digest != in.Digest || a.Receipt.RunID != m.RunID || a.Receipt.Epoch != m.Epoch {
+		return nil
+	}
+	receipt := &a.Receipt
+	if a.Reconciliation != nil {
+		receipt = a.Reconciliation
+	}
+	if receipt.RemoteID == "" {
+		return nil
+	}
+	switch receipt.Status {
+	case "reply_posted", "completion_requested", "delivery_confirmed":
+		return b.Box.RemoveDelivered(s.IssueID, m.ID, in.Digest)
+	}
+	return nil
+}
+
 func (b Bridge) emitReceipts(a mailbox.Action) error {
 	if err := b.Box.Emit(a.Receipt); err != nil {
 		return err
@@ -465,6 +515,7 @@ func (b Bridge) reconcile(s *mailbox.State, comments []multica.Comment) error {
 		resolved.Status = "delivery_confirmed"
 		resolved.RemoteID = matched
 		a.Reconciliation = &resolved
+		a.Intent = nil
 		s.Actions[id] = a
 		if err := b.Box.Save(*s); err != nil {
 			return err

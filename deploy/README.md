@@ -183,6 +183,9 @@ the mailbox Skill.
 Create custom paths before starting Compose. Protect `secrets/` and
 `data/runtime/`; give a coding agent only the mailbox access it needs.
 An agent needs Inbox write access to send replies or finish Runs on request.
+The Bridge also needs the Inbox bind to be writable so it can remove confirmed
+requests. The container root filesystem, configuration, and secrets remain
+read-only. Apply the current Compose file as well as the new image when upgrading.
 For setup and approval rules, see the [coding agent guide](../docs/agent-integration.md).
 Use separate containers, mounts and credentials for mutually untrusted environments.
 
@@ -193,3 +196,11 @@ Keep `data/runtime` and `data/state` together. To rotate a token for the same
 account, update its secret file and run `docker compose restart bridge` once
 active Runs finish. For a different account or service, use a new connection ID;
 do not copy unprocessed requests across connections.
+
+There is no historic mailbox migration. For a disposable older test
+installation, optionally start with empty Inbox and Outbox directories: first
+verify in Multica that no Runs are active and check locally for pending or
+uncertain requests. Stop the container, move the old Inbox and Outbox outside
+their bind locations as a reversible backup, and recreate the empty directories
+with the original ownership and permissions. Do not reset runtime identity or
+replay state. An empty mailbox is not a reset of the persisted replay state.

@@ -248,6 +248,7 @@ class MailboxCLI(unittest.TestCase):
         self.invoke("list", "--unread")
         self.assertTrue(self.invoke("read", "comment-1")["body_truncated"])
         self.assertFalse((self.root / "pickup").exists())
+        self.assertFalse((self.outbox / ".acks").exists())
         safe_path = str(self.root / "never-opened-worktree")
         draft_path = str(self.root / "never-opened-draft")
         picked = self.invoke("pickup", "issue-1", "--worktree", safe_path, "--draft", draft_path)
@@ -257,7 +258,16 @@ class MailboxCLI(unittest.TestCase):
         self.assertFalse(Path(draft_path).exists())
         self.assertEqual(self.invoke("ack", "comment-1")["status"], "acknowledged_locally")
         self.invoke("ack", "comment-1")
+        marker = self.outbox / ".acks" / "issue-1" / "comment-1.ack"
+        self.assertEqual(marker.read_bytes(), b"")
+        self.assertTrue((self.outbox / "comment-1.json").is_file())
         self.assertEqual([e["id"] for e in self.invoke("list", "--unread")], ["task-1"])
+        # The Bridge may have consumed the marker before a retry.
+        (self.outbox / "comment-1.json").unlink()
+        marker.unlink()
+        self.assertEqual(self.invoke("ack", "comment-1")["status"], "acknowledged_locally")
+        self.assertFalse(marker.exists())
+        self.invoke("ack", "never-seen", success=False)
         self.event("comment-edit", "comment", source_id="source-1", revision="new")
         self.assertEqual(self.invoke("status", "issue-1")["unread_count"], 2)
         self.event("sync-1", "sync", status="retrying", revision="2")
@@ -270,6 +280,19 @@ class MailboxCLI(unittest.TestCase):
         self.assertEqual(json.loads(rec.read_text())["acknowledged"], ["comment-1"])
         self.assertEqual(rec.stat().st_mode & 0o777, 0o600)
         self.assertFalse((self.root / "state").exists())
+
+    def test_ack_does_not_follow_marker_or_ack_other_event_types(self):
+        target = self.root / "outside"
+        target.mkdir()
+        (self.outbox / ".acks").symlink_to(target)
+        self.invoke("ack", "comment-1", success=False)
+        self.assertFalse(list(target.iterdir()))
+        self.assertTrue((self.outbox / "comment-1.json").exists())
+        self.invoke("ack", "task-1")
+        self.event("result-1", "receipt", request_id="request-1", status="reply_posted")
+        self.invoke("ack", "result-1", success=False)
+        self.assertTrue((self.outbox / "task-1.json").exists())
+        self.assertTrue((self.outbox / "result-1.json").exists())
 
     def test_sync_recovery_takes_precedence_over_old_failure(self):
         d, path = self.make_draft()
@@ -634,6 +657,10 @@ print(json.dumps(rows[connection]))
         self.assertEqual(self.invoke(*scope_a, "status", "issue-1")["unread_count"], 1)
         self.assertNotIn("worktree", self.invoke(*scope_b, "status", "issue-1"))
         self.assertEqual(self.invoke(*scope_b, "status", "issue-1")["unread_count"], 2)
+        self.invoke(*scope_a, "ack", "comment-1")
+        relative = Path(".acks") / "issue-1" / "comment-1.ack"
+        self.assertTrue((self.outbox / "alpha" / "workspace-1" / relative).is_file())
+        self.assertFalse((self.outbox / "alpha" / "workspace-2" / relative).exists())
 
     def test_namespace_replacement_during_confirmation_is_refused(self):
         scope, _ = self.scoped_fixture("alpha", "workspace-1")

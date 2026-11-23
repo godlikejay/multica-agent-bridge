@@ -189,6 +189,16 @@ def receipt(request_id, expected, binding):
     raise SystemExit('E2E FAIL: receipt timeout; do not resend. Request: ' + request_id)
 
 
+def expect_inbox_cleaned(issue_id, request_id):
+    path = MAIL / 'inbox' / issue_id / (request_id + '.json')
+    for _ in range(20):
+        if not os.path.lexists(path):
+            print('Confirmed reply removed from Inbox:', request_id)
+            return
+        time.sleep(0.5)
+    raise SystemExit('E2E FAIL: confirmed reply still present in Inbox: ' + request_id)
+
+
 def smoke(token):
     workspace = synthetic_workspace(token)
     e = task_event(wait=60)
@@ -204,7 +214,8 @@ def smoke(token):
     print('Task claimed and read:', issue, run, 'epoch', e['epoch'])
 
     body = MARKER + ': ordinary smoke reply ' + uuid.uuid4().hex
-    posted = receipt(submit(e, 'reply', body), 'reply_posted', e)
+    request_id = submit(e, 'reply', body)
+    posted = receipt(request_id, 'reply_posted', e)
     comments = get(path + '/comments?recent=200', token, workspace, complete=True)
     delivered = [c for c in comments if body in c.get('content', '') and not c.get('deleted_at')]
     require(len(delivered) == 1 and posted.get('remote_id') and delivered[0].get('id') == posted['remote_id']
@@ -212,6 +223,7 @@ def smoke(token):
             and delivered[0].get('author_id') == row['agent_id'] and delivered[0].get('author_type') == 'agent',
             'ordinary reply missing, duplicated, or not posted by the exact Run on the exact Issue')
     print('Ordinary reply verified remotely:', posted['remote_id'])
+    expect_inbox_cleaned(issue, request_id)
 
     receipt(submit(e, 'complete', MARKER + ': smoke complete.'), 'completion_requested', e)
     for _ in range(60):

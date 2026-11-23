@@ -79,7 +79,7 @@ class SmokeFixture(unittest.TestCase):
             self.assertNotIn('synthetic-secret', ' '.join(call.args[0]))
         self.assertNotIn('synthetic-secret', out.getvalue())
 
-    def remote(self, status='running', comment_run=None, final='completed'):
+    def remote(self, status='running', comment_run=None, final='completed', remove_reply=True):
         workspace, agent, comment = uid(3), uid(4), uid(5)
         captured = {}
 
@@ -108,6 +108,8 @@ class SmokeFixture(unittest.TestCase):
             self.assertEqual(message['kind'], 'reply' if kind == 'reply_posted' else 'complete')
             if kind == 'reply_posted':
                 captured['body'] = message['body']
+                if remove_reply and comment_run is None:
+                    (self.mail / 'inbox' / self.event['issue_id'] / (rid + '.json')).unlink()
             return dict(remote_id=comment)
 
         return get, receipt
@@ -122,6 +124,7 @@ class SmokeFixture(unittest.TestCase):
     def test_smoke_verified_reply_then_exact_completion(self):
         out = self.run_smoke()
         self.assertIn('Ordinary reply verified remotely:', out)
+        self.assertIn('Confirmed reply removed from Inbox:', out)
         self.assertIn('REAL MULTICA E2E PASS: exact Run completed: ' + self.event['run_id'], out)
 
     def test_smoke_expected_binding_before_write(self):
@@ -132,6 +135,12 @@ class SmokeFixture(unittest.TestCase):
     def test_smoke_does_not_complete_after_remote_reply_mismatch(self):
         with self.assertRaisesRegex(SystemExit, 'ordinary reply missing, duplicated, or not posted'):
             self.run_smoke(comment_run=uid(6))
+        self.assertEqual(len(list((self.mail/'inbox'/self.event['issue_id']).glob('*.json'))), 1)
+
+    def test_smoke_requires_confirmed_reply_cleanup(self):
+        with (patch.object(f.time, 'sleep'),
+              self.assertRaisesRegex(SystemExit, 'confirmed reply still present in Inbox')):
+            self.run_smoke(remove_reply=False)
         self.assertEqual(len(list((self.mail/'inbox'/self.event['issue_id']).glob('*.json'))), 1)
 
     def test_smoke_requires_remote_completion_not_just_receipt(self):
