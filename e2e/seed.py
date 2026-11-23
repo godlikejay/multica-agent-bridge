@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 
-from fixture import API, MARKER, OPENER, ROOT, UUID, WORKSPACE, require, synthetic_workspace, token_for_file
+from fixture import API, MARKER, OPENER, ROOT, UUID, WORKSPACE, require, smoke, synthetic_workspace, token_for_file
 
 # These are the disposable fixture values in compose.yaml, not user settings.
 EMAIL = 'bridge-e2e@example.invalid'
@@ -142,6 +142,90 @@ def dispatch(token):
     print('Issued one synthetic task:', issue_id)
 
 
+def implicit_follow_up(owner, owner_id, member, member_id, agent_id, task, parent_id):
+    issue, original = task['issue_id'], task['run_id']
+    path = '/api/issues/' + issue
+    content = 'Synthetic thread reply without an explicit mention'
+
+    def runs():
+        return list_rows(request('GET', path + '/task-runs?scope=issue', **owner), 'Issue Run')
+
+    def post(actor, actor_id):
+        posted = request('POST', path + '/comments',
+                         {'content': content, 'type': 'comment', 'parent_id': parent_id}, **actor)
+        require(posted.get('issue_id') == issue and posted.get('parent_id') == parent_id
+                and posted.get('author_type') == 'member' and posted.get('author_id') == actor_id
+                and posted.get('content') == content and not posted.get('trigger_outcomes'),
+                'implicit follow-up was not saved as a plain reply to the exact parent')
+        return uuid_field(posted, 'id')
+
+    def original_running(rows):
+        return any(r.get('id') == original and r.get('status') == 'running'
+                   and r.get('agent_id') == agent_id for r in rows)
+
+    def carries(run, source_id):
+        return (run.get('trigger_comment_id') == source_id
+                or source_id in (run.get('coalesced_comment_ids') or [])
+                or source_id in (run.get('delivered_comment_ids') or []))
+
+    initial = runs()
+    require(len(initial) == 1 and original_running(initial),
+            'implicit follow-up needs the original fixture Run to remain active')
+    denied_id = post(member, member_id)
+    comments = list_rows(request('GET', path + '/comments', **owner), 'Issue comment')
+    require(any(c.get('id') == denied_id and c.get('parent_id') == parent_id
+                and c.get('author_id') == member_id and c.get('content') == content for c in comments),
+            'member fixture reply not independently visible on the original thread')
+    before_allow = runs()
+    require(len(before_allow) == 1 and original_running(before_allow)
+            and not any(carries(r, denied_id) for r in before_allow),
+            'member without permission changed the running fixture’s queue or input')
+    print('Thread reply denied: comment saved while original Run remained active:', denied_id)
+
+    allowed_id = post(owner, owner_id)
+    require(allowed_id != denied_id, 'distinct thread replies reused the same ID')
+    queued = runs()
+    require(original_running(queued) and len(queued) <= 2
+            and not any(carries(r, denied_id) for r in queued),
+            'start-after reply interrupted current Run or added a denied input')
+    require(all(r.get('id') == original
+                or (r.get('status') in ('pending', 'queued', 'deferred') and carries(r, allowed_id))
+                for r in queued), 'unexpected pending Run before the original completion')
+    # Some upstream queues persist a second row, others defer to completion's
+    # reconciliation. In either case only the owner reply may be claimed next.
+    print('Owner thread reply saved without stopping the original Run:', allowed_id)
+
+    def after_complete():
+        deadline = time.monotonic() + 60
+        while True:
+            rows = runs()
+            require(len(rows) <= 2 and not any(carries(r, denied_id) for r in rows),
+                    'denied thread reply entered an upstream Run')
+            next_rows = [r for r in rows if r.get('id') != original]
+            if next_rows:
+                run = next_rows[0]
+                require(run.get('issue_id') == issue and run.get('agent_id') == agent_id
+                        and run.get('workspace_id') == owner['workspace']
+                        and run.get('trigger_comment_id') == allowed_id,
+                        'next Run does not match the exact authorized thread reply')
+                require(run.get('status') not in ('failed', 'cancelled', 'canceled'),
+                        'next Run failed before the queued thread reply was claimed')
+                if run.get('status') == 'running' and run.get('delivered_comment_ids'):
+                    require(run['delivered_comment_ids'] == [allowed_id],
+                            'next Run did not deliver only the authorized thread reply')
+                    run_id = uuid_field(run, 'id')
+                    print('THREAD REPLY PROTOCOL E2E PASS: exact queued reply claimed:', run_id,
+                          'trigger:', allowed_id)
+                    # Free the synthetic single-slot daemon for the independent
+                    # explicit-mention scenario; never cancel a Run by nickname.
+                    request('POST', path + '/tasks/' + run_id + '/cancel', {}, **owner)
+                    return
+            require(time.monotonic() < deadline, 'authorized thread reply was not claimed after completion')
+            time.sleep(1)
+
+    return after_complete
+
+
 def invocation_protocol(owner_token):
     workspace = synthetic_workspace(owner_token)
     owner = {'token': owner_token, 'workspace': workspace}
@@ -162,6 +246,8 @@ def invocation_protocol(owner_token):
                and a.get('owner_id') == owner_id and a.get('permission_mode') == 'private']
     require(len(matches) == 1, 'permission test needs the owner’s private fixture Agent')
     agent_id = uuid_field(matches[0], 'id')
+    smoke(owner_token, follow_up=lambda task, parent: implicit_follow_up(
+        owner, owner_id, member, member_id, agent_id, task, parent))
     # Separate and unassigned: no automatic run/source and no existing mention thread.
     issue = request('POST', '/api/issues', {'title': 'Disposable invocation permission fixture',
                                            'status': 'todo'}, **owner)

@@ -36,7 +36,6 @@ case "${1:-help}" in
     python3 -B seed.py auth
     sh ./run.sh bootstrap --token-file .local/pat
     python3 -B seed.py dispatch
-    sh ./run.sh smoke --token-file .local/pat
     python3 -B seed.py invocation
     ;;
   up)

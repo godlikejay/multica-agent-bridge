@@ -254,7 +254,7 @@ def expect_inbox_cleaned(issue_id, request_id):
     raise SystemExit('E2E FAIL: confirmed reply still present in Inbox: ' + request_id)
 
 
-def smoke(token):
+def smoke(token, follow_up=None):
     workspace = synthetic_workspace(token)
     e = task_event(wait=60)
     issue, run = e['issue_id'], e['run_id']
@@ -292,12 +292,15 @@ def smoke(token):
             'ordinary reply missing, duplicated, or not posted by the exact Run on the exact Issue')
     print('Ordinary reply verified remotely:', posted['remote_id'])
     expect_inbox_cleaned(issue, request_id)
+    after_complete = follow_up(e, posted['remote_id']) if follow_up else None
 
     receipt(submit(e, 'complete', MARKER + ': smoke complete.'), 'completion_requested', e)
     for _ in range(60):
         status = get('/api/daemon/tasks/' + run + '/status', token).get('status')
         if status == 'completed':
             print('REAL MULTICA E2E PASS: exact Run completed:', run)
+            if after_complete:
+                after_complete()
             return
         require(status not in ('failed', 'cancelled', 'canceled'), 'remote Run failed or was cancelled')
         time.sleep(2)

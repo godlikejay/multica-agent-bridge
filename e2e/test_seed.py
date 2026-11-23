@@ -87,6 +87,43 @@ class SeedFixture(unittest.TestCase):
                     seed.dispatch(SYNTHETIC_PAT)
                 self.assertTrue(all(c.args[0] == 'GET' for c in request.call_args_list))
 
+    def test_thread_start_after_is_bound_to_exact_parent_and_authorized_input(self):
+        owner_id, member_id, parent, denied, allowed, original, following = (
+            f'00000000-0000-0000-0000-{i:012d}' for i in range(11, 18))
+        owner = dict(token=SYNTHETIC_PAT, workspace=WS)
+        member = dict(token='member-jwt', workspace=WS)
+        task = dict(issue_id=ISSUE, run_id=original)
+        old = dict(id=original, status='running', agent_id=AGENT)
+        new = dict(id=following, issue_id=ISSUE, status='running', agent_id=AGENT,
+                   workspace_id=WS, trigger_comment_id=allowed, delivered_comment_ids=[allowed])
+
+        def post(source, actor):
+            return dict(id=source, issue_id=ISSUE, parent_id=parent, author_type='member',
+                        author_id=actor, content='Synthetic thread reply without an explicit mention')
+
+        member_post, owner_post = post(denied, member_id), post(allowed, owner_id)
+        before_completion = [[old], member_post, [member_post], [old], owner_post, [old]]
+        with (patch.object(seed, 'request', side_effect=before_completion
+                           + [[dict(old, status='completed'), new], {}]) as request,
+              contextlib.redirect_stdout(io.StringIO()) as logs):
+            finish = seed.implicit_follow_up(owner, owner_id, member, member_id, AGENT, task, parent)
+            self.assertEqual(request.call_count, 6)
+            finish()
+        posts = [c for c in request.call_args_list if c.args[0] == 'POST'
+                 and c.args[1].endswith('/comments')]
+        self.assertEqual(posts[0].args[2], posts[1].args[2])
+        self.assertEqual(posts[0].args[2]['parent_id'], parent)
+        self.assertNotIn('mention://', posts[0].args[2]['content'])
+        self.assertEqual([c.kwargs['token'] for c in posts], ['member-jwt', SYNTHETIC_PAT])
+        self.assertTrue(request.call_args.args[1].endswith('/' + following + '/cancel'))
+        self.assertIn('THREAD REPLY PROTOCOL E2E PASS:', logs.getvalue())
+
+        with (patch.object(seed, 'request', side_effect=before_completion + [
+                  [dict(old, status='completed'), dict(new, delivered_comment_ids=[denied, allowed])]]),
+              contextlib.redirect_stdout(io.StringIO()),
+              self.assertRaisesRegex(SystemExit, 'denied thread reply entered an upstream Run')):
+            seed.implicit_follow_up(owner, owner_id, member, member_id, AGENT, task, parent)()
+
     def test_invocation_protocol_compares_same_mention_by_distinct_actors(self):
         owner_id, member_id, invitation_id, denied_id, allowed_id, run_id = (
             f'00000000-0000-0000-0000-{i:012d}' for i in range(5, 11)
@@ -111,6 +148,7 @@ class SeedFixture(unittest.TestCase):
         ]
         with (patch.object(seed, 'synthetic_workspace', return_value=WS),
               patch.object(seed, 'login', return_value='member-jwt') as login,
+              patch.object(seed, 'smoke'),
               patch.object(seed, 'request', side_effect=prefix + [
                   [dict(run, delivered_comment_ids=[])],
                   [dict(run, delivered_comment_ids=[allowed_id])],
@@ -127,6 +165,7 @@ class SeedFixture(unittest.TestCase):
 
         with (patch.object(seed, 'synthetic_workspace', return_value=WS),
               patch.object(seed, 'login', return_value='member-jwt'),
+              patch.object(seed, 'smoke'),
               patch.object(seed, 'request', side_effect=prefix + [
                   [dict(run, delivered_comment_ids=[allowed_id, denied_id])],
               ]), contextlib.redirect_stdout(io.StringIO()),
