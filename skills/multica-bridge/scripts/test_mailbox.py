@@ -127,6 +127,31 @@ class MailboxCLI(unittest.TestCase):
         self.assertEqual(self.invoke("read", "follow-up")["body"], "New run's message")
         self.assertNotIn("run_input", self.invoke("read", "comment-1"))
 
+    def test_read_continues_exact_input_body_at_utf8_boundaries(self):
+        text = "a" * (cli.MAX_READ_BODY - 1) + "佛" + "🌙" * 8500 + "\nexact tail"
+        self.event("issue-body", "comment", run_id="issue-context", source_id="source-1",
+                   revision="1", body=text)
+        self.event("run-input", "comment", source_id="source-1", revision="1",
+                   run_input="trigger", body_ref="issue-body")
+        first = self.invoke("read", "run-input")
+        self.assertEqual(first["next_offset"], cli.MAX_READ_BODY - 1)
+        self.assertEqual(first["body"], "a" * (cli.MAX_READ_BODY - 1))
+        self.assertTrue(first["body_truncated"])
+        self.assertIn("invalid UTF-8 body offset",
+                      self.invoke("read", "run-input", "--offset", cli.MAX_READ_BODY, success=False))
+        second = self.invoke("read", "run-input", "--offset", first["next_offset"])
+        self.assertTrue(second["body"].startswith("佛🌙"))
+        self.assertTrue(second["body_truncated"])
+        last = self.invoke("read", "run-input", "--offset", second["next_offset"])
+        self.assertTrue(last["body"].endswith("\nexact tail"))
+        self.assertFalse(last["body_truncated"])
+        self.assertNotIn("next_offset", last)
+        self.assertEqual(first["body"] + second["body"] + last["body"], text)
+        self.assertTrue(all(p["id"] == "run-input" and p["run_id"] == "run-1"
+                            for p in (first, second, last)))
+        self.assertFalse((self.root / "pickup").exists())
+        self.assertFalse((self.outbox / ".acks").exists())
+
     def test_draft_not_live_and_no_controlling_tty(self):
         d, path = self.make_draft()
         self.assertEqual(d["event_id"], "comment-1")

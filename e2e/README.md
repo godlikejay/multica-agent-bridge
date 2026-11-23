@@ -16,10 +16,13 @@ synthetic member through the normal invitation API. While the first Run is
 active, both people post the same plain reply under the Bridge's real agent
 comment. The member's reply is saved without queueing a Run. The owner's reply
 leaves the original Run running and becomes the exact input of the next Run
-after normal completion. A separate unassigned Issue checks explicit
+after normal completion. On the next active Run, the same fixture posts an
+only-comment reply and queues a follow-up, then repeats the UI's cancellation
+and restart requests. It compares the new Bridge manifest to Multica's actual
+claim rather than assuming whether the queued message and the restart land
+in the same Run. A separate unassigned Issue checks explicit
 `@agent` invocation of the same private Agent: the member's mention is saved
-but blocked, and the owner's identical mention is admitted. These checks use
-Multica Run and comment responses rather than local mailbox classification.
+but blocked, and the owner's identical mention is admitted. Multica Run and comment responses are the source of truth for these checks.
 It needs no browser, GitHub secret, or existing
 Multica account. The stack, test volumes, and local credentials are removed
 on exit. It refuses to run over an existing `e2e/.local` directory. Keep the

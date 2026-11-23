@@ -124,6 +124,44 @@ class SeedFixture(unittest.TestCase):
               self.assertRaisesRegex(SystemExit, 'denied thread reply entered an upstream Run')):
             seed.implicit_follow_up(owner, owner_id, member, member_id, AGENT, task, parent)()
 
+    def test_restart_follows_upstream_claim_even_if_c_was_already_dispatched(self):
+        active, queued, replacement, parent, b, c, d = (
+            f'00000000-0000-0000-0000-{i:012d}' for i in range(21, 28))
+        owner = dict(token=SYNTHETIC_PAT, workspace=WS)
+        scope = dict(issue_id=ISSUE, agent_id=AGENT, workspace_id=WS)
+        running = dict(scope, id=active, status='running')
+        cancelled = dict(running, status='cancelled')
+        pending = dict(scope, id=queued, status='queued', trigger_comment_id=c)
+
+        def posted(source, label):
+            return dict(id=source, issue_id=ISSUE, parent_id=parent,
+                        content=seed.MARKER + ': restart ' + label)
+
+        prefix = [[running], posted(b, 'B / only comment'), [running],
+                  posted(c, 'C / after current Run'), [running, pending], cancelled,
+                  posted(d, 'D / restart')]
+        for split in (False, True):
+            last = replacement if split else queued
+            end = dict(scope, id=last, status='running',
+                       delivered_comment_ids=[d] if split else [c, d])
+            c_run = dict(pending, status='running', delivered_comment_ids=[c])
+            responses = ([[cancelled, c_run], [cancelled, dict(c_run, status='completed'), end]]
+                         if split else [[cancelled, end]])
+            task = dict(issue_id=ISSUE, run_id=queued)
+            with (self.subTest(split=split), patch.object(seed, 'request',
+                       side_effect=prefix + responses + [dict(end, status='cancelled')]) as request,
+                  patch.object(seed, 'expect_run_inputs', return_value=task) as handoff,
+                  patch.object(seed, 'submit', return_value='synthetic') as submit,
+                  patch.object(seed, 'receipt'), patch.object(seed.time, 'sleep'),
+                  contextlib.redirect_stdout(io.StringIO())):
+                seed.stop_and_restart(owner, AGENT, ISSUE, active, parent)
+                self.assertEqual(request.call_args_list[1].args[2]['suppress_agent_ids'], [AGENT])
+                self.assertTrue(request.call_args_list[5].args[1].endswith('/' + active + '/cancel'))
+                self.assertTrue(request.call_args_list[6].args[1].endswith('/comments'))
+                self.assertEqual(handoff.call_args.args, (ISSUE, last, end['delivered_comment_ids']))
+                self.assertEqual(handoff.call_count, 2 if split else 1)
+                self.assertEqual(submit.call_count, 1 if split else 0)
+
     def test_invocation_protocol_compares_same_mention_by_distinct_actors(self):
         owner_id, member_id, invitation_id, denied_id, allowed_id, run_id = (
             f'00000000-0000-0000-0000-{i:012d}' for i in range(5, 11)

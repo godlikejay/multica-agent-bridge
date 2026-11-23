@@ -1341,7 +1341,9 @@ def parser():
     listing.add_argument("--issue-id")
     listing.add_argument("--run-id")
     listing.add_argument("--unread", action="store_true")
-    commands.add_parser("read").add_argument("event_id")
+    read = commands.add_parser("read", help="read an exact event body in bounded UTF-8 pages")
+    read.add_argument("event_id")
+    read.add_argument("--offset", type=int, default=0, help="continue with the returned next_offset")
     receipt = commands.add_parser("receipt")
     receipt.add_argument("request_id")
     receipt.add_argument("--issue-id")
@@ -1409,8 +1411,16 @@ def run(args):
                 if not isinstance(body, str):
                     raise MailboxError("invalid event body")
                 raw = body.encode("utf-8")
-                emit({**metadata(e), "body": raw[:MAX_READ_BODY].decode("utf-8", errors="ignore"),
-                      "body_truncated": len(raw) > MAX_READ_BODY})
+                start = args.offset
+                if start < 0 or start > len(raw) or (start < len(raw) and raw[start] & 0xC0 == 0x80):
+                    raise MailboxError("invalid UTF-8 body offset; continue with next_offset")
+                # A page may end inside a multibyte character. Advance by
+                # emitted bytes, not by the raw slice limit.
+                page = raw[start:start + MAX_READ_BODY].decode("utf-8", errors="ignore")
+                end = start + len(page.encode("utf-8"))
+                truncated = end < len(raw)
+                emit({**metadata(e), "body": page, "body_truncated": truncated,
+                      **({"next_offset": end} if truncated else {})})
             elif args.command == "receipt":
                 issue = require_id(args.issue_id) if args.issue_id is not None else None
                 run_id = require_id(args.run_id) if args.run_id is not None else None

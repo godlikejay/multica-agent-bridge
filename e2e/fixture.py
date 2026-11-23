@@ -212,6 +212,38 @@ def expect_initial_sync(binding):
     raise SystemExit('E2E FAIL: successful initial sync missing for the exact Run.')
 
 
+def expect_run_inputs(issue, run, sources):
+    """Compare the Bridge's ready manifest to the exact upstream claim receipt."""
+    deadline = time.monotonic() + 45
+    while True:
+        events = {e['id']: e for e in outbox_records() if e.get('issue_id') == issue}
+        tasks = [e for e in events.values() if e.get('kind') == 'task' and e.get('run_id') == run]
+        require(len(tasks) <= 1, 'more than one local task for the exact synthetic Run')
+        if tasks:
+            task = tasks[0]
+            sync = max((e for e in events.values() if e.get('kind') == 'sync'
+                        and all(e.get(k) == task[k] for k in BINDING)),
+                       key=lambda e: e.get('revision', 0), default={})
+            ids = sync.get('input_ids')
+            if sync.get('status') in ('healthy', 'recovered') and isinstance(ids, list):
+                observed = []
+                for event_id in ids:
+                    ref = events.get(event_id, {})
+                    body = events.get(ref.get('body_ref'), {})
+                    require(ref.get('kind') == 'comment' and ref.get('run_input') in ('trigger', 'coalesced')
+                            and all(ref.get(k) == task[k] for k in BINDING)
+                            and body.get('kind') == 'comment' and body.get('run_id') == 'issue-context'
+                            and body.get('source_id') == ref.get('source_id')
+                            and body.get('revision') == ref.get('revision'), 'invalid local Run input reference')
+                    observed.append(ref['source_id'])
+                require(observed == sources,
+                        'Bridge inputs do not match the authoritative Multica claim for ' + run)
+                print('Bridge manifest matches exact Multica Run and inputs:', run, observed)
+                return task
+        require(time.monotonic() < deadline, 'Bridge did not hand off exact claimed Run ' + run)
+        time.sleep(1)
+
+
 def post_note(issue_path, token, workspace, body):
     result = api_request(issue_path + '/comments', token, workspace,
                          payload={'content': body, 'type': 'comment'})

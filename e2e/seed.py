@@ -8,7 +8,8 @@ import time
 import urllib.error
 import urllib.request
 
-from fixture import API, MARKER, OPENER, ROOT, UUID, WORKSPACE, require, smoke, synthetic_workspace, token_for_file
+from fixture import (API, MARKER, OPENER, ROOT, UUID, WORKSPACE, expect_run_inputs,
+                     receipt, require, smoke, submit, synthetic_workspace, token_for_file)
 
 # These are the disposable fixture values in compose.yaml, not user settings.
 EMAIL = 'bridge-e2e@example.invalid'
@@ -142,7 +143,7 @@ def dispatch(token):
     print('Issued one synthetic task:', issue_id)
 
 
-def implicit_follow_up(owner, owner_id, member, member_id, agent_id, task, parent_id):
+def implicit_follow_up(owner, owner_id, member, member_id, agent_id, task, parent_id, after_claim=None):
     issue, original = task['issue_id'], task['run_id']
     path = '/api/issues/' + issue
     content = 'Synthetic thread reply without an explicit mention'
@@ -216,14 +217,96 @@ def implicit_follow_up(owner, owner_id, member, member_id, agent_id, task, paren
                     run_id = uuid_field(run, 'id')
                     print('THREAD REPLY PROTOCOL E2E PASS: exact queued reply claimed:', run_id,
                           'trigger:', allowed_id)
-                    # Free the synthetic single-slot daemon for the independent
-                    # explicit-mention scenario; never cancel a Run by nickname.
-                    request('POST', path + '/tasks/' + run_id + '/cancel', {}, **owner)
+                    if after_claim:
+                        after_claim(issue, run_id, parent_id)
+                    else:
+                        request('POST', path + '/tasks/' + run_id + '/cancel', {}, **owner)
                     return
             require(time.monotonic() < deadline, 'authorized thread reply was not claimed after completion')
             time.sleep(1)
 
     return after_complete
+
+
+def stop_and_restart(owner, agent, issue, active, parent):
+    """Replay the UI's two requests without assuming when the daemon polls."""
+    path = '/api/issues/' + issue
+
+    def runs():
+        return list_rows(request('GET', path + '/task-runs?scope=issue', **owner), 'Issue Run')
+
+    def post(label, *, quiet=False):
+        content = MARKER + ': restart ' + label
+        payload = {'content': content, 'type': 'comment', 'parent_id': parent}
+        if quiet:
+            payload['suppress_agent_ids'] = [agent]
+        row = request('POST', path + '/comments', payload, **owner)
+        require(row.get('issue_id') == issue and row.get('parent_id') == parent
+                and row.get('content') == content, 'restart fixture reply was not saved')
+        return uuid_field(row, 'id')
+
+    def cancel(run):
+        row = request('POST', path + '/tasks/' + run + '/cancel', {}, **owner)
+        require(row.get('id') == run and row.get('status') == 'cancelled',
+                'Multica did not confirm cancellation of the exact requested Run')
+
+    def belongs_to(row, comment):
+        return (row.get('trigger_comment_id') == comment
+                or comment in (row.get('coalesced_comment_ids') or []))
+
+    before = runs()
+    old_ids = {uuid_field(row, 'id') for row in before}
+    require(any(row.get('id') == active and row.get('status') == 'running'
+                and row.get('agent_id') == agent for row in before),
+            'restart fixture needs an exact running Run')
+    b = post('B / only comment', quiet=True)
+    require({uuid_field(row, 'id') for row in runs()} == old_ids,
+            'only-comment reply unexpectedly added a Run')
+    c = post('C / after current Run')
+    queued = runs()
+    pending = [row for row in queued if row.get('id') not in old_ids]
+    require(any(row.get('id') == active and row.get('status') == 'running' for row in queued)
+            and len(pending) == 1 and pending[0].get('status') in ('pending', 'queued', 'deferred')
+            and belongs_to(pending[0], c),
+            'restart fixture did not establish a queued C behind running A')
+    queued_id = uuid_field(pending[0], 'id')
+    cancel(active)
+    d = post('D / restart')
+    require(len({b, c, d}) == 3, 'restart fixture comment IDs are not distinct')
+
+    # C can be claimed between the cancellation request and the POST for D.
+    # If so, finish C to let the real dispatcher expose D separately. Do not
+    # guess ownership from comment timestamps or the text sent by the fixture.
+    seen = set()
+    deadline = time.monotonic() + 90
+    while True:
+        rows = runs()
+        require(any(row.get('id') == active and row.get('status') == 'cancelled' for row in rows),
+                'original Run is not cancelled upstream')
+        for row in rows:
+            run = uuid_field(row, 'id')
+            delivered = row.get('delivered_comment_ids') or []
+            require(b not in delivered, 'only-comment B was delivered as a Run input')
+            if run in old_ids or run in seen or row.get('status') != 'running' or not delivered:
+                continue
+            require(row.get('issue_id') == issue and row.get('agent_id') == agent
+                    and row.get('workspace_id') == owner['workspace']
+                    and set(delivered) <= {c, d} and len(set(delivered)) == len(delivered),
+                    'unexpected Run or inputs in upstream restart claim')
+            event = expect_run_inputs(issue, run, delivered)
+            seen.add(run)
+            if d in delivered:
+                c_state = next((r.get('status') for r in rows if r.get('id') == queued_id), 'not listed')
+                print('STOP AND RESTART PROTOCOL E2E PASS: cancelled A:', active,
+                      'queued C:', queued_id, 'C status:', c_state,
+                      'D delivered by:', run, 'co-delivered C:', c in delivered,
+                      'B (not an input):', b, 'C:', c, 'D:', d)
+                cancel(run)  # Free the synthetic daemon for the independent permission check.
+                return
+            require(delivered == [c] and len(seen) == 1, 'unexpected claim before D')
+            receipt(submit(event, 'complete', MARKER + ': finish queued C'), 'completion_requested', event)
+        require(time.monotonic() < deadline, 'Multica did not dispatch restart D')
+        time.sleep(1)
 
 
 def invocation_protocol(owner_token):
@@ -247,7 +330,8 @@ def invocation_protocol(owner_token):
     require(len(matches) == 1, 'permission test needs the owner’s private fixture Agent')
     agent_id = uuid_field(matches[0], 'id')
     smoke(owner_token, follow_up=lambda task, parent: implicit_follow_up(
-        owner, owner_id, member, member_id, agent_id, task, parent))
+        owner, owner_id, member, member_id, agent_id, task, parent,
+        after_claim=lambda issue, run, parent_id: stop_and_restart(owner, agent_id, issue, run, parent_id)))
     # Separate and unassigned: no automatic run/source and no existing mention thread.
     issue = request('POST', '/api/issues', {'title': 'Disposable invocation permission fixture',
                                            'status': 'todo'}, **owner)

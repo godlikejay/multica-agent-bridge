@@ -59,8 +59,8 @@ for routine work. Use `scopes` only for setup or troubleshooting.
    each Issue, or `tasks OPS-123` to narrow the list. Report issue keys, short
    titles, and what needs attention, not raw JSON or internal IDs. This is not
    the full Multica queue or proof that a Run is still live.
-2. Use `show OPS-123` for the task snapshot and `show EVENT_ID` for exact
-   text. Request `--full` only when omitted text matters. Use `comments
+2. Use `show OPS-123` for the task snapshot and `show EVENT_ID` for a
+   specific event. Request `--full` only when omitted text matters. Use `comments
    OPS-123` for local unread Issue discussion in chronological order, and
    `--after NEXT` to continue the returned page. Start without a cursor for
    a fresh unread check, which can include late arrivals. These reads do
@@ -103,8 +103,11 @@ in the separate Issue view. If more background is available, or before
 replying or completing, use `comments ISSUE --context` and follow its
 `next` cursor; it will not expose unclassified future triggers to the Run.
 If `take` reports `partial`, don't treat the Run as fully read. Use
-`take TARGET --full` or read the required exact events with
-`show EVENT_ID --full`. Acknowledge only
+`take TARGET --full` or `read EVENT_ID` for the required exact events.
+When `read` returns `next_offset`, continue with
+`read EVENT_ID --offset NEXT_OFFSET` until no offset is returned. In a
+multi-route project, pass the event's `--connection` and `--workspace`
+before `read`. Reading pages does not acknowledge anything. Acknowledge only
 after actually receiving and consuming it, and after any intended direct
 reply has been submitted. Use `ack-take TARGET EVENT_ID ...` for eligible
 IDs returned in `ackable`; never pass background or omitted IDs. If using
