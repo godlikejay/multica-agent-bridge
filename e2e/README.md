@@ -1,6 +1,6 @@
 # One local Multica smoke test
 
-The smoke test covers one synthetic Issue on the pinned Multica v0.11.1
+The smoke test covers synthetic Issues on the pinned Multica v0.11.1
 Server/Web, one daemon and the current checkout's Bridge. It needs Docker
 Compose v2 and Python 3 on the Docker host. It never needs a model key,
 coding agent, production account or real repository.
@@ -11,7 +11,13 @@ From a fresh checkout on a Docker host with Compose v2, Python 3, and ports
 13000 and 18080 free, run `make e2e-auto`. It starts a disposable stack,
 uses the pinned local development login to mint a one-day PAT for a synthetic
 account, starts the daemon, creates and assigns one test Issue, and runs the
-same protocol smoke below. It needs no browser, GitHub secret, or existing
+same protocol smoke below. The automated command then uses the normal
+invitation API to admit a second synthetic member and checks explicit invocation
+of the same private Agent on a separate unassigned Issue. The member's
+mention must be saved but blocked without a Run. The owner's identical
+mention must be admitted with an exact trigger and delivered input ID.
+These checks use Multica responses rather than local mailbox classification.
+It needs no browser, GitHub secret, or existing
 Multica account. The stack, test volumes, and local credentials are removed
 on exit. It refuses to run over an existing `e2e/.local` directory. Keep the
 fixed development verification code on this loopback-only fixture.

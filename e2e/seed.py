@@ -12,6 +12,7 @@ from fixture import API, MARKER, OPENER, ROOT, UUID, WORKSPACE, require, synthet
 
 # These are the disposable fixture values in compose.yaml, not user settings.
 EMAIL = 'bridge-e2e@example.invalid'
+MEMBER_EMAIL = 'bridge-e2e-member@example.invalid'
 WORKSPACE_SLUG = 'bridge-e2e-only'
 DEVICE = 'synthetic-bridge-e2e'
 AGENT = 'Synthetic Bridge E2E'
@@ -60,9 +61,7 @@ def list_rows(value, kind):
 
 def auth(token_file):
     require(not os.path.lexists(token_file), 'refusing to replace an existing PAT file')
-    request('POST', '/auth/send-code', {'email': EMAIL})
-    session = request('POST', '/auth/verify-code', {'email': EMAIL, 'code': '888888'})
-    jwt = auth_token(session)
+    jwt = login(EMAIL)
     workspaces = list_rows(request('GET', '/api/workspaces', token=jwt), 'workspace')
     require(not workspaces, 'expected a fresh synthetic account without workspaces')
     workspace = request('POST', '/api/workspaces',
@@ -77,6 +76,11 @@ def auth(token_file):
     with os.fdopen(fd, 'w', encoding='utf-8') as output:
         output.write(pat + '\n')
     print('Synthetic workspace created; one-day PAT saved privately.')
+
+
+def login(email):
+    request('POST', '/auth/send-code', {'email': email})
+    return auth_token(request('POST', '/auth/verify-code', {'email': email, 'code': '888888'}))
 
 
 def auth_token(row, prefix=''):
@@ -119,7 +123,8 @@ def dispatch(token):
     agents = list_rows(request('GET', '/api/agents?include_archived=true', **scope), 'agent')
     require(not any(a.get('name') == AGENT for a in agents),
             'test Agent already exists; use a fresh stack rather than dispatching again')
-    agent = request('POST', '/api/agents', {'name': AGENT, 'runtime_id': runt}, **scope)
+    agent = request('POST', '/api/agents', {'name': AGENT, 'runtime_id': runt,
+                                           'permission_mode': 'private'}, **scope)
     agent_id = uuid_field(agent, 'id')
     require(agent.get('workspace_id') == workspace and agent.get('runtime_id') == runt,
             'seed Agent workspace or runtime mismatch')
@@ -137,16 +142,94 @@ def dispatch(token):
     print('Issued one synthetic task:', issue_id)
 
 
+def invocation_protocol(owner_token):
+    workspace = synthetic_workspace(owner_token)
+    owner = {'token': owner_token, 'workspace': workspace}
+    owner_id = uuid_field(request('GET', '/api/me', token=owner_token), 'id')
+    member_token = login(MEMBER_EMAIL)
+    member_id = uuid_field(request('GET', '/api/me', token=member_token), 'id')
+    require(member_id != owner_id, 'permission test requires distinct members')
+    member = {'token': member_token, 'workspace': workspace}
+    invite = request('POST', '/api/workspaces/' + workspace + '/members',
+                     {'email': MEMBER_EMAIL, 'role': 'member'}, **owner)
+    accepted = request('POST', '/api/invitations/' + uuid_field(invite, 'id') + '/accept',
+                       token=member_token)
+    require(accepted.get('role') == 'member' and accepted.get('user_id') == member_id
+            and accepted.get('workspace_id') == workspace, 'permission test membership mismatch')
+
+    agents = list_rows(request('GET', '/api/agents?include_archived=true', **owner), 'agent')
+    matches = [a for a in agents if a.get('name') == AGENT and a.get('workspace_id') == workspace
+               and a.get('owner_id') == owner_id and a.get('permission_mode') == 'private']
+    require(len(matches) == 1, 'permission test needs the owner’s private fixture Agent')
+    agent_id = uuid_field(matches[0], 'id')
+    # Separate and unassigned: no automatic run/source and no existing mention thread.
+    issue = request('POST', '/api/issues', {'title': 'Disposable invocation permission fixture',
+                                           'status': 'todo'}, **owner)
+    issue_id = uuid_field(issue, 'id')
+    require(issue.get('workspace_id') == workspace and not issue.get('assignee_id'),
+            'permission test Issue is not an unassigned fixture')
+    base = '/api/issues/' + issue_id
+    # Exact same explicit target and text; only the posting principal changes.
+    content = f'[@Synthetic private agent](mention://agent/{agent_id}) synthetic invocation check'
+
+    def post(actor, actor_id, outcome, reason):
+        posted = request('POST', base + '/comments', {'content': content, 'type': 'comment'}, **actor)
+        source = uuid_field(posted, 'id')
+        require(posted.get('issue_id') == issue_id and posted.get('author_id') == actor_id
+                and posted.get('author_type') == 'member' and posted.get('content') == content,
+                'upstream comment posting proof did not match the expected actor or Issue')
+        targets = list_rows(posted.get('trigger_outcomes'), 'trigger outcome')
+        require(len(targets) == 1 and targets[0].get('target_type') == 'agent'
+                and targets[0].get('target_id') == agent_id and targets[0].get('status') == outcome
+                and targets[0].get('reason_code') == reason,
+                'upstream did not return the expected invocation outcome: ' + outcome + '/' + reason)
+        return source
+
+    def runs():
+        return list_rows(request('GET', base + '/task-runs?scope=issue', **owner), 'Issue Run')
+
+    require(not runs(), 'unassigned permission test fixture already has a Run')
+    denied_id = post(member, member_id, 'blocked', 'invocation_not_allowed')
+    comments = list_rows(request('GET', base + '/comments', **owner), 'Issue comment')
+    require(any(c.get('id') == denied_id and c.get('author_id') == member_id
+                and c.get('content') == content for c in comments),
+            'denied member’s comment was not independently readable on the Issue')
+    require(not runs(), 'denied member unexpectedly queued or triggered a Run')
+    print('Invocation denied: comment saved; private target explicitly blocked; no Run:', denied_id)
+
+    allowed_id = post(owner, owner_id, 'queued', 'queued')
+    require(denied_id != allowed_id, 'two distinct comments returned an identical ID')
+    deadline = time.monotonic() + 60
+    while True:
+        rows = runs()
+        require(len(rows) <= 1, 'permission test observed an unexpected additional Run')
+        if rows:
+            run = rows[0]
+            require(run.get('issue_id') == issue_id and run.get('workspace_id') == workspace
+                    and run.get('agent_id') == agent_id and run.get('trigger_comment_id') == allowed_id,
+                    'upstream Run was not bound to the exact authorized mention')
+            require(run.get('status') not in ('failed', 'cancelled', 'canceled'),
+                    'authorized mention produced a failed or cancelled Run')
+            delivered = run.get('delivered_comment_ids')
+            if run.get('status') in ('running', 'completed') and delivered:
+                require(delivered == [allowed_id], 'upstream delivered IDs included unauthorized or unexpected inputs')
+                print('INVOCATION PROTOCOL E2E PASS: exact authorized Run claimed:',
+                      uuid_field(run, 'id'), 'trigger:', allowed_id)
+                return
+        require(time.monotonic() < deadline, 'authorized mention did not produce an exact claimed Run')
+        time.sleep(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('auth', 'dispatch'))
+    parser.add_argument('command', choices=('auth', 'dispatch', 'invocation'))
     parser.add_argument('--token-file', type=Path, default=ROOT / 'pat')
     args = parser.parse_args()
     try:
         if args.command == 'auth':
             auth(args.token_file)
         else:
-            dispatch(token_for_file(args.token_file))
+            (dispatch if args.command == 'dispatch' else invocation_protocol)(token_for_file(args.token_file))
     except (ValueError, OSError):
         raise SystemExit('E2E FAIL: private PAT file or local stack unavailable.') from None
 

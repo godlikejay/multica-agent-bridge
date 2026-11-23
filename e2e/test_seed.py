@@ -87,6 +87,52 @@ class SeedFixture(unittest.TestCase):
                     seed.dispatch(SYNTHETIC_PAT)
                 self.assertTrue(all(c.args[0] == 'GET' for c in request.call_args_list))
 
+    def test_invocation_protocol_compares_same_mention_by_distinct_actors(self):
+        owner_id, member_id, invitation_id, denied_id, allowed_id, run_id = (
+            f'00000000-0000-0000-0000-{i:012d}' for i in range(5, 11)
+        )
+        content = f'[@Synthetic private agent](mention://agent/{AGENT}) synthetic invocation check'
+
+        def comment(source, actor, status, reason):
+            return dict(id=source, author_type='member', author_id=actor, issue_id=ISSUE,
+                        content=content, trigger_outcomes=[dict(target_type='agent',
+                        target_id=AGENT, status=status, reason_code=reason)])
+
+        denied = comment(denied_id, member_id, 'blocked', 'invocation_not_allowed')
+        allowed = comment(allowed_id, owner_id, 'queued', 'queued')
+        run = dict(id=run_id, issue_id=ISSUE, workspace_id=WS, agent_id=AGENT,
+                   status='running', trigger_comment_id=allowed_id)
+        prefix = [
+            dict(id=owner_id), dict(id=member_id), dict(id=invitation_id),
+            dict(role='member', user_id=member_id, workspace_id=WS),
+            [dict(name=seed.AGENT, id=AGENT, owner_id=owner_id, workspace_id=WS,
+                  permission_mode='private')],
+            dict(id=ISSUE, workspace_id=WS), [], denied, [denied], [], allowed,
+        ]
+        with (patch.object(seed, 'synthetic_workspace', return_value=WS),
+              patch.object(seed, 'login', return_value='member-jwt') as login,
+              patch.object(seed, 'request', side_effect=prefix + [
+                  [dict(run, delivered_comment_ids=[])],
+                  [dict(run, delivered_comment_ids=[allowed_id])],
+              ]) as request, patch.object(seed.time, 'sleep'),
+              contextlib.redirect_stdout(io.StringIO()) as logs):
+            seed.invocation_protocol(SYNTHETIC_PAT)
+        login.assert_called_once_with(seed.MEMBER_EMAIL)
+        posts = [c for c in request.call_args_list if c.args[0] == 'POST'
+                 and c.args[1].endswith('/comments')]
+        self.assertEqual([c.args[2]['content'] for c in posts], [content, content])
+        self.assertEqual([c.kwargs['token'] for c in posts], ['member-jwt', SYNTHETIC_PAT])
+        self.assertIn('INVOCATION PROTOCOL E2E PASS', logs.getvalue())
+        self.assertNotIn('member-jwt', logs.getvalue())
+
+        with (patch.object(seed, 'synthetic_workspace', return_value=WS),
+              patch.object(seed, 'login', return_value='member-jwt'),
+              patch.object(seed, 'request', side_effect=prefix + [
+                  [dict(run, delivered_comment_ids=[allowed_id, denied_id])],
+              ]), contextlib.redirect_stdout(io.StringIO()),
+              self.assertRaisesRegex(SystemExit, 'delivered IDs included unauthorized')):
+            seed.invocation_protocol(SYNTHETIC_PAT)
+
     def test_request_never_follows_redirect_or_reports_response_secret(self):
         rejected = urllib.error.HTTPError(
             seed.API + '/api/tokens', 302, 'redirect', {'Location': 'https://example.invalid'},
