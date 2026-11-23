@@ -222,7 +222,9 @@ def post_note(issue_path, token, workspace, body):
 
 
 def expect_issue_note(issue, source_id, body, discussion):
-    for _ in range(30):
+    # A note sent just after initial sync must survive the full default 30s
+    # Bridge poll interval plus time for the next HTTP read and disk publish.
+    for _ in range(45):
         events = [e for e in outbox_records()
                   if e.get('kind') == 'comment' and e.get('issue_id') == issue
                   and e.get('source_id') == source_id]
@@ -267,10 +269,12 @@ def smoke(token):
     print('Task claimed and read:', issue, run, 'epoch', e['epoch'])
     expect_initial_sync(e)
 
-    excerpts = (('/note [mab-context] ', 'ordinary'), ('/note ', None))
-    for prefix, discussion in excerpts:
+    notes = []
+    for prefix, discussion in (('/note [mab-context] ', 'ordinary'), ('/note ', None)):
         note = prefix + MARKER + ': ' + uuid.uuid4().hex
-        note_id = post_note(path, token, workspace, note)
+        notes.append((post_note(path, token, workspace, note), note, discussion))
+    # Let the worker pick up both notes in its next poll.
+    for note_id, note, discussion in notes:
         expect_issue_note(issue, note_id, note, discussion)
     current_runs = get(path + '/task-runs', token, workspace)
     require({r.get('id') for r in current_runs} == {r.get('id') for r in runs},

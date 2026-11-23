@@ -145,6 +145,16 @@ class SmokeFixture(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, error):
                     f.expect_issue_note(self.event['issue_id'], source_id, body, 'ordinary')
 
+    def test_smoke_note_waits_past_default_bridge_poll_interval(self):
+        body = '/note [mab-context] synthetic test'
+        source_id = self.publish_note('/api/issues/' + self.event['issue_id'],
+                                      'test-pat', uid(3), body)
+        event = json.loads(self.task.with_name('note-' + source_id + '.json').read_text())
+        with (patch.object(f, 'outbox_records', side_effect=[[]] * 31 + [[event]]),
+              patch.object(f.time, 'sleep') as sleep):
+            f.expect_issue_note(self.event['issue_id'], source_id, body, 'ordinary')
+        self.assertEqual(sleep.call_count, 31)
+
     def run_smoke(self, **kwargs):
         get, receipt = self.remote(**kwargs)
         with (patch.object(f, 'get', side_effect=get), patch.object(f, 'receipt', side_effect=receipt),
