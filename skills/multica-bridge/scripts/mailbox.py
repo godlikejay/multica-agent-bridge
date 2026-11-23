@@ -7,7 +7,9 @@ retain their explicit scope selectors and draft/submit interface.
 """
 
 import argparse
+import base64
 from collections import Counter
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import heapq
@@ -37,7 +39,7 @@ KINDS = {"reply", "complete"}
 TERMINAL = {"completion_requested"}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-COMPACT_COMMANDS = {"tasks", "show", "runs", "take", "current", "ack-take", "reply", "complete", "result"}
+COMPACT_COMMANDS = {"tasks", "show", "comments", "runs", "take", "current", "ack-take", "reply", "complete", "result"}
 
 
 class MailboxError(Exception):
@@ -135,9 +137,31 @@ def events(outbox):
             yield info.st_mtime_ns, e
 
 
+def with_input_body(event, lookup):
+    if event["kind"] != "comment" or "body_ref" not in event:
+        return event
+    reference = require_id(event["body_ref"])
+    if event.get("run_input") not in ("trigger", "coalesced"):
+        raise MailboxError("body references are only valid on Run input comments")
+    try:
+        body = lookup(reference)
+    except FileNotFoundError:
+        body = None
+    if (body is None or body["kind"] != "comment" or body["run_id"] != "issue-context"
+            or body.get("run_input") or "body_ref" in body
+            or body["issue_id"] != event["issue_id"] or not valid_id(event.get("source_id"))
+            or body.get("source_id") != event["source_id"]
+            or body.get("revision") != event.get("revision")):
+        raise MailboxError("Run input body is unavailable or does not match the exact comment")
+    text = body.get("body", "")
+    if not isinstance(text, str):
+        raise MailboxError("invalid Run input body")
+    return {**event, "body": text}
+
+
 def metadata(e):
     keys = ("id", "kind", *BINDING, *SCOPE_FIELDS, "issue_key", "source_id", "revision", "run_input",
-            "request_id", "status", "remote_id", "observed_at", "last_synced_at")
+            "discussion", "created_at", "body_ref", "request_id", "status", "remote_id", "observed_at", "last_synced_at")
     return {k: (e[k][:256] if isinstance(e[k], str) else e[k])
             for k in keys if k in e and type(e[k]) in (str, int)}
 
@@ -165,6 +189,9 @@ def build_draft(outbox, event_id, kind, body):
     e = load_event(outbox, event_id)
     if e["kind"] not in {"task", "comment"}:
         raise MailboxError("draft must name a task or comment event")
+    if e["run_id"] == "issue-context":
+        raise MailboxError("Issue discussion is not an actionable Run target")
+    with_input_body(e, lambda ref: load_event(outbox, ref))
     body = bounded_body(body)
     return {"event_id": event_id, "request": {
         "version": 1, "id": uuid.uuid4().hex, "kind": kind, "body": body,
@@ -194,8 +221,11 @@ def resolve_request(outbox, item):
     require_id(request["id"])
     bounded_body(request["body"])
     e = load_event(outbox, item["event_id"])
+    if e["run_id"] == "issue-context":
+        raise MailboxError("Issue discussion is not an actionable Run target")
     if e["kind"] not in {"task", "comment"} or bind(e) != bind(request):
         raise MailboxError("draft does not match the named task/comment event")
+    with_input_body(e, lambda ref: load_event(outbox, ref))
     parent = parent_fields(e, request["kind"])
     if {k: request[k] for k in ("parent_id",) if k in request} != parent:
         raise MailboxError("draft reply parent does not match the selected event; make a new draft")
@@ -205,6 +235,8 @@ def resolve_request(outbox, item):
 def rebind_draft(outbox, item, event_id):
     original = resolve_request(outbox, item)
     e = load_event(outbox, event_id)
+    if e["run_id"] == "issue-context":
+        raise MailboxError("Issue discussion is not an actionable Run target")
     if e["kind"] not in UNREAD_KINDS or e["issue_id"] != original["issue_id"]:
         raise MailboxError("rebind must select a task/comment event for the same issue")
     if e["epoch"] <= original["epoch"]:
@@ -912,14 +944,114 @@ def project_current(path, identity, routes):
     return selected
 
 
+def issue_comment_key(event):
+    source = event.get("source_id")
+    revision = event.get("revision")
+    return (source, revision if isinstance(revision, str) else "") if valid_id(source) else (event["id"], "")
+
+
+def canonical_comments(rows):
+    # Never fall back to Run input copies; reading the Issue must not consume
+    # its Run input. Prefer the stable Issue event over legacy Run snapshots.
+    unique = {}
+    for when, event in rows:
+        if event["kind"] != "comment" or event.get("run_input"):
+            continue
+        key = issue_comment_key(event)
+        previous = unique.get(key)
+        order = event.get("run_id") != "issue-context", when, event["id"]
+        if previous is None or order < (previous[1].get("run_id") != "issue-context", previous[0], previous[1]["id"]):
+            unique[key] = when, event
+    return unique.values()
+
+
+def comment_order(when, event):
+    created = event.get("created_at")
+    if isinstance(created, str):
+        try:
+            timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if timestamp.tzinfo is not None:
+                elapsed = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+                when = ((elapsed.days * 86400 + elapsed.seconds) * 1000000 + elapsed.microseconds) * 1000
+        except (ValueError, OverflowError):
+            pass
+    return when, event["id"]
+
+
+def comments_cursor(scope, issue, mode, snapshot, last):
+    payload = json.dumps([list(scope), issue, mode, snapshot, *last], separators=(",", ":")).encode("ascii")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def parse_comments_cursor(token, scope, issue, mode):
+    try:
+        if len(token) > 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise ValueError("invalid token")
+        fields = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if (not isinstance(fields, list) or len(fields) != 6 or fields[:3] != [list(scope), issue, mode]
+                or not all(type(v) is int for v in fields[3:5]) or not valid_id(fields[5])):
+            raise ValueError("invalid cursor scope")
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise MailboxError("invalid comments cursor for this Issue") from exc
+    return fields[3], tuple(fields[4:])
+
+
+def discussion_command(root_fd, args, rows):
+    selector = require_id(args.target)
+    matches = [row for row in rows if row[2]["kind"] == "task" and row[2]["id"] == selector]
+    latest = latest_tasks(rows, selector)
+    if matches or latest:
+        _, scope, task = unique_row(matches or latest)
+        issue, display = task["issue_id"], task.get("issue_key") or task["issue_id"]
+    else:
+        # Ordinary discussion can outlast the task snapshot. Exact Issue IDs
+        # still identify it if one allowed route has matching comments.
+        scopes = {route for _, route, event in rows if event["kind"] == "comment"
+                  and not event.get("run_input") and event["issue_id"] == selector}
+        _, scope, _ = unique_row([(0, route, None) for route in scopes])
+        issue = display = selector
+    if not 1 <= args.limit <= MAX_LIST:
+        raise MailboxError(f"limit must be 1–{MAX_LIST}")
+    candidates = [(when, event) for when, route, event in rows if route == scope
+                  and event["issue_id"] == issue and event["kind"] == "comment"]
+    snapshot = max((when for when, _ in candidates), default=0)
+    last = None
+    mode = ("context" if args.context else "discussion") + ("-all" if args.all else "-unread")
+    if args.after is not None:
+        snapshot, last = parse_comments_cursor(args.after, scope, issue, mode)
+    directory = pickup_dir(root_fd, scope)
+    try:
+        acked = set(read_pickup(directory, issue)["acknowledged"])
+    finally:
+        if directory is not None:
+            os.close(directory)
+    ordered = ((comment_order(when, event), event) for when, event in canonical_comments(
+        (when, event) for when, event in candidates if when <= snapshot))
+    visible = sorted((key, event) for key, event in ordered
+                     if (not args.context or event.get("discussion") == "ordinary")
+                     and (args.all or event["id"] not in acked) and (last is None or key > last))
+    page = visible[:args.limit]
+    result = {"issue": display, "comments": [
+        {**(metadata(event) if args.verbose else {}),
+         "target": event["id"], "discussion": "ordinary" if event.get("discussion") == "ordinary" else "unknown",
+         **({"created_at": event["created_at"]} if isinstance(event.get("created_at"), str) else {}),
+         **compact_body(event, 1200 if args.verbose else 600)}
+        for _, event in page]}
+    if len(visible) > len(page):
+        result["next"] = comments_cursor(scope, issue, mode, snapshot, page[-1][0])
+    compact_emit(result)
+
+
 def assigned_command(root_fd, routes, args, rows, current_path, identity):
     tasks = latest_tasks(rows)
     exact = {}
     others = {}
+    bodies = {}
     for when, route, event in rows:
         exact.setdefault((route, bind(event)), []).append((when, event))
         if event["kind"] == "comment":
             others.setdefault((route, event["issue_id"]), []).append((when, event))
+            bodies[(route, event["id"])] = event
 
     def card(row):
         _, route, task = row
@@ -930,10 +1062,17 @@ def assigned_command(root_fd, routes, args, rows, current_path, identity):
         finally:
             if directory is not None:
                 os.close(directory)
-        comments = {event["id"]: event for _, event in exact[(route, bind(task))]
-                    if event["kind"] == "comment" and event.get("run_input") in ("trigger", "coalesced")}
-        if status == "ready" and any(i not in comments and i not in acked for i in ids):
-            status = "input_unavailable"
+        comments = {}
+        if status == "ready":
+            for event_id in ids:
+                event = bodies.get((route, event_id))
+                if event is not None and bind(event) == bind(task) and event.get("run_input") in ("trigger", "coalesced"):
+                    try:
+                        comments[event_id] = with_input_body(event, lambda ref: bodies.get((route, ref)))
+                    except MailboxError:
+                        pass
+                if event_id not in comments and event_id not in acked:
+                    status = "input_unavailable"
         result = {"issue": task.get("issue_key") or task["issue_id"], "target": task["id"],
                   "title": compact_body(task, 120)["text"].split("\n", 1)[0], "status": status}
         if args.verbose:
@@ -1028,9 +1167,12 @@ def assigned_command(root_fd, routes, args, rows, current_path, identity):
         remaining -= len(body["text"])
         if not body.get("truncated"):
             ackable.append(event_id)
-    background = sorted(((when, event) for when, event in others.get((route, task["issue_id"]), ())
-                         if event["id"] not in acked and event.get("run_input") not in ("trigger", "coalesced")),
-                        key=lambda row: (row[0], row[1]["id"]), reverse=True)
+    input_keys = {issue_comment_key(comments[i]) for i in manifest if i in comments}
+    background = sorted(((when, event) for when, event in canonical_comments(
+        others.get((route, task["issue_id"]), ()))
+        if event["id"] not in acked and event.get("discussion") == "ordinary"
+        and issue_comment_key(event) not in input_keys),
+        key=lambda row: comment_order(*row), reverse=True)
     view.update({"inputs": primary,
                  "background": [{"target": event["id"], **compact_body(event, 300)}
                                 for _, event in background[:4]],
@@ -1093,6 +1235,9 @@ def compact_command(root_fd, routes, args, current_path, identity):
             os.close(outbox_fd)
 
     rows = list(project_events(root_fd, routes))
+    if cmd == "comments":
+        discussion_command(root_fd, args, rows)
+        return
     if cmd in {"runs", "take", "current", "ack-take"}:
         assigned_command(root_fd, routes, args, rows, current_path, identity)
         return
@@ -1119,6 +1264,9 @@ def compact_command(root_fd, routes, args, current_path, identity):
     selector = require_id(args.target)
     matches = [row for row in rows if row[2]["id"] == selector and row[2]["kind"] in UNREAD_KINDS]
     _, scope, event = unique_row(matches or latest_tasks(rows, selector))
+    scoped_comments = {item["id"]: item for _, route, item in rows
+                       if route == scope and item["kind"] == "comment"}
+    event = with_input_body(event, scoped_comments.get)
     detail = {"target": event["id"], **compact_body(event, MAX_READ_BODY if args.verbose or args.full else 1800)}
     if args.verbose:
         detail.update(metadata(event))
@@ -1130,9 +1278,16 @@ def compact_command(root_fd, routes, args, current_path, identity):
                           reverse=True)
         limit = MAX_LIST if args.verbose else 20 if args.full else 4
         if comments:
-            detail["comments"] = [{"target": row["id"], **compact_body(row, MAX_READ_BODY if args.verbose or args.full else 500),
-                                   **({"input": row["run_input"]} if row.get("run_input") else {}),
-                                   **(metadata(row) if args.verbose else {})} for _, row in comments[:limit]]
+            detail["comments"] = []
+            for _, row in comments[:limit]:
+                try:
+                    body = compact_body(with_input_body(row, scoped_comments.get),
+                                        MAX_READ_BODY if args.verbose or args.full else 500)
+                except MailboxError:
+                    body = {"status": "input_unavailable"}
+                detail["comments"].append({"target": row["id"], **body,
+                                           **({"input": row["run_input"]} if row.get("run_input") else {}),
+                                           **(metadata(row) if args.verbose else {})})
         if len(comments) > limit:
             detail["more_comments"] = len(comments) - limit
         if any(row.get("status") in TERMINAL for _, row in bound if row["kind"] == "receipt"):
@@ -1169,6 +1324,12 @@ def parser():
     show = commands.add_parser("show", help="show a received Issue or event")
     show.add_argument("target")
     show.add_argument("--full", action="store_true", help="include longer task text and more comments")
+    comments = commands.add_parser("comments", help="read a chronological page of Issue discussion")
+    comments.add_argument("target")
+    comments.add_argument("--after", help="continue with the previous page's next cursor")
+    comments.add_argument("--limit", type=int, default=8)
+    comments.add_argument("--context", action="store_true", help="show only comments explicitly opted into Run context")
+    comments.add_argument("--all", action="store_true", help="include acknowledged comments still available locally")
     commands.add_parser("result", help="check a submitted request").add_argument("target")
     for kind in ("reply", "complete"):
         action = commands.add_parser(kind, help=f"{kind} a run by exact event target")
@@ -1243,6 +1404,7 @@ def run(args):
         try:
             if args.command == "read":
                 e = load_event(outbox, args.event_id)
+                e = with_input_body(e, lambda ref: load_event(outbox, ref))
                 body = e.get("body", "")
                 if not isinstance(body, str):
                     raise MailboxError("invalid event body")

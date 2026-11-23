@@ -99,6 +99,7 @@ tool=.agents/skills/multica-bridge/scripts/mailbox.py
 python3 "$tool" runs
 python3 "$tool" take OPS-123
 python3 "$tool" current
+python3 "$tool" comments OPS-123
 # Use exact targets from take; run only the write the operator requested.
 python3 "$tool" reply TASK_TARGET 'The fix is ready.'
 # Or reply and request that this Run end.
@@ -111,6 +112,11 @@ python3 "$tool" result REQUEST_ID
 queue. `take` selects a ready Run locally, shows its assigned inputs separately
 from unread Issue context, and does not execute or acknowledge anything.
 `current` keeps that exact selection; it does not pick its replacement.
+Use `comments` to review the locally synced Issue discussion independently,
+including during a Run, and follow its next page if present. A comment
+starting with `/note [mab-context]` explicitly opts into unread pickup
+background without triggering a Run in Multica. Other comments remain
+available separately; they are never promoted into the Run by the Bridge.
 Acknowledge only fully received inputs you no longer need to answer directly
 or to recover work. For local acknowledgment details see the [Skill](../skills/multica-bridge/SKILL.md).
 For a reply to a particular comment, use that comment's exact target.

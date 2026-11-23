@@ -117,9 +117,38 @@ class SmokeFixture(unittest.TestCase):
 
         return get, receipt
 
+    def publish_note(self, path, token, workspace, body):
+        self.assertEqual(path, '/api/issues/' + self.event['issue_id'])
+        self.assertEqual(token, 'test-pat')
+        self.assertEqual(workspace, uid(3))
+        marked = body.startswith('/note [mab-context] ')
+        source_id = uid(10 if marked else 11)
+        event = dict(self.event, kind='comment', id='note-' + source_id,
+                     run_id='issue-context', source_id=source_id, body=body,
+                     created_at='2026-11-23T05:00:00.123456Z')
+        if marked:
+            event['discussion'] = 'ordinary'
+        self.task.with_name(event['id'] + '.json').write_text(json.dumps(event))
+        return source_id
+
+    def test_smoke_note_requires_source_bound_canonical_body_with_valid_time(self):
+        source_id = uid(10)
+        path = self.task.with_name('note-' + source_id + '.json')
+        body = '/note [mab-context] synthetic test'
+        self.publish_note('/api/issues/' + self.event['issue_id'], 'test-pat', uid(3), body)
+        event = json.loads(path.read_text())
+        for fields, error in (({'run_input': 'trigger'}, 'not classified'),
+                              ({'discussion': 'unmarked'}, 'not classified'),
+                              ({'created_at': 'x'}, 'no parseable created_at')):
+            with self.subTest(fields=fields):
+                path.write_text(json.dumps(dict(event, **fields)))
+                with self.assertRaisesRegex(SystemExit, error):
+                    f.expect_issue_note(self.event['issue_id'], source_id, body, 'ordinary')
+
     def run_smoke(self, **kwargs):
         get, receipt = self.remote(**kwargs)
         with (patch.object(f, 'get', side_effect=get), patch.object(f, 'receipt', side_effect=receipt),
+              patch.object(f, 'post_note', side_effect=self.publish_note),
               contextlib.redirect_stdout(io.StringIO()) as out):
             f.smoke('test-pat')
         return out.getvalue()
@@ -127,6 +156,7 @@ class SmokeFixture(unittest.TestCase):
     def test_smoke_verified_reply_then_exact_completion(self):
         out = self.run_smoke()
         self.assertIn('Initial sync verified with no Run comment inputs:', out)
+        self.assertIn('Issue context verified for marked and unmarked human notes without creating a Run:', out)
         self.assertIn('Ordinary reply verified remotely:', out)
         self.assertIn('Confirmed reply removed from Inbox:', out)
         self.assertIn('REAL MULTICA E2E PASS: exact Run completed: ' + self.event['run_id'], out)

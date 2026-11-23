@@ -182,6 +182,124 @@ func TestInboxCleanupAfterRestartUsesExactSavedDigest(t *testing.T) {
 	}
 }
 
+func TestIssueAckDoesNotConsumeRunInputAndCancellationKeepsUnreadBody(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	remote := &manifestRemote{inputs: []string{"C", "X"}}
+	c := multica.Comment{ID: "C", Revision: "1", Body: "original request"}
+	x := multica.Comment{ID: "X", Revision: "1", Body: "unread original request"}
+	i2 := multica.Comment{ID: "I2", Revision: "1", Body: "/note [mab-context] update"}
+	human := multica.Comment{ID: "H", Revision: "1", Body: "/note human-only"}
+	d := multica.Comment{ID: "D", Revision: "1", Body: "later Run request"}
+	comments := []multica.Comment{c, x, i2, human, d}
+	remote.snapshotAfter(comments, nil)
+	_, errs, stop := run(t, box, remote, "C-run")
+	base := task(t, box, "C-run")
+	out := filepath.Join(box.Root, "outbox")
+	body := await(t, box, func(m mailbox.Message) bool { return m.SourceID == "C" && m.RunInput == "" })
+	xBody := await(t, box, func(m mailbox.Message) bool { return m.SourceID == "X" && m.RunInput == "" })
+	ref := await(t, box, func(m mailbox.Message) bool { return m.SourceID == "C" && m.RunInput == "trigger" })
+	xRef := await(t, box, func(m mailbox.Message) bool { return m.SourceID == "X" && m.RunInput == "coalesced" })
+	if ref.Body != "" || ref.BodyRef != body.ID || xRef.BodyRef != xBody.ID {
+		t.Fatal("Run input must refer to the one Issue body")
+	}
+	for _, tc := range []struct{ id, kind string }{{"I2", "ordinary"}, {"D", ""}, {"H", ""}} {
+		ev := await(t, box, func(m mailbox.Message) bool { return m.SourceID == tc.id })
+		if ev.Discussion != tc.kind || ev.RunInput != "" {
+			t.Fatalf("comment %s was incorrectly classified", tc.id)
+		}
+	}
+	ackDir := filepath.Join(out, ".acks", base.IssueID)
+	if err := os.MkdirAll(ackDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ack := func(id string) {
+		t.Helper()
+		marker := filepath.Join(ackDir, id+".ack")
+		if err := os.WriteFile(marker, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		waitRemoved(t, marker)
+	}
+	ack(body.ID)
+	if _, err := os.Stat(filepath.Join(out, body.ID+".json")); err != nil {
+		t.Fatal("Issue read removed a body still referenced by a Run", err)
+	}
+	ack(ref.ID)
+	waitRemoved(t, filepath.Join(out, body.ID+".json"))
+	waitRemoved(t, filepath.Join(out, ref.ID+".json"))
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	next := &manifestRemote{inputs: []string{"D"}, cancelled: []string{"C-run"}}
+	next.snapshotAfter(comments, nil)
+	_, errs, stop = run(t, box, next, "D-run")
+	waitRemoved(t, filepath.Join(out, xRef.ID+".json"))
+	if _, err := os.Stat(filepath.Join(out, xBody.ID+".json")); err != nil {
+		t.Fatal("cancellation lost an unread Issue comment", err)
+	}
+	dInput := await(t, box, func(m mailbox.Message) bool { return m.RunID == "D-run" && m.SourceID == "D" })
+	if dInput.RunInput != "trigger" {
+		t.Fatalf("D had no new formal input: %+v", dInput)
+	}
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestPendingReferenceIsProtectedBeforeReplay(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	if err := box.Init(); err != nil {
+		t.Fatal(err)
+	}
+	b := Bridge{Box: box, RunID: "C"}
+	s, err := box.Load("issue-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RunID, s.Epoch = "C", 1
+	c := multica.Comment{ID: "input", Body: "fixture", Revision: "1"}
+	source := mailbox.ID("source", c.ID, c.Revision, c.Body)
+	key := mailbox.ID("run-input", "C", "trigger", source)
+	ref := mailbox.ID("comment", s.IssueID, "C", key)
+	body := mailbox.ID("issue-comment", s.IssueID, source)
+	s.Seen["issue-comment:"+source], s.Seen[key] = body, ref
+	s.CommentRefs = map[string]mailbox.CommentRef{ref: {Body: body, Run: "C", Pending: true}}
+	if err := box.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.Emit(mailbox.Message{Version: 1, Kind: "comment", ID: body, IssueID: s.IssueID,
+		RunID: "issue-context", Epoch: 1, Body: c.Body, SourceID: c.ID, Revision: c.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(box.Root, "outbox")
+	dir := filepath.Join(root, ".acks", s.IssueID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, body+".ack"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.CleanComments(&s, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, body+".json")); err != nil {
+		t.Fatal("acknowledged body disappeared before the pending Run replay", err)
+	}
+	got, err := b.emitComment(&s, mailbox.Message{Version: 1, IssueID: s.IssueID, RunID: "C", Epoch: 1}, c, "trigger")
+	if err != nil || got != ref || s.CommentRefs[ref].Pending {
+		t.Fatalf("pending reference was not replayed: %s %v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ref+".ack"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := box.CleanComments(&s, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitRemoved(t, filepath.Join(root, body+".json"))
+}
+
 func TestManualRoundTripAndRestart(t *testing.T) {
 	box := mailbox.Box{Root: t.TempDir()}
 	r := new(fake)
@@ -259,7 +377,7 @@ func TestFollowUpInputsSurviveRunHandoff(t *testing.T) {
 			old := task(t, box, "run-1")
 			for _, id := range []string{"history", "follow-up-1", "follow-up-2"} {
 				await(t, box, func(m mailbox.Message) bool {
-					return m.Kind == "comment" && m.RunID == old.RunID && m.SourceID == id && m.RunInput == ""
+					return m.Kind == "comment" && m.RunID == "issue-context" && m.SourceID == id && m.RunInput == ""
 				})
 			}
 			if reason == "complete" {
@@ -573,12 +691,14 @@ func (r *recoveryRemote) totalReads() int {
 
 type manifestRemote struct {
 	recoveryRemote
-	inputs []string
+	inputs    []string
+	cancelled []string
 }
 
 func (r *manifestRemote) Task(ctx context.Context) (multica.Task, error) {
 	t, err := r.recoveryRemote.Task(ctx)
 	t.DeliveredCommentIDs = r.inputs
+	t.CancelledRunIDs = r.cancelled
 	if len(r.inputs) > 0 {
 		t.TriggerCommentID = r.inputs[0]
 	}

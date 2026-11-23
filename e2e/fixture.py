@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One synthetic, loopback-only Multica acceptance check."""
 import argparse
+from datetime import datetime
 import getpass
 import json
 import os
@@ -42,12 +43,20 @@ def require(condition, message):
 
 
 def get(path, token=None, workspace=None, complete=False):
+    return api_request(path, token, workspace, complete=complete)
+
+
+def api_request(path, token, workspace, *, complete=False, payload=None):
     headers = {'Accept': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     if workspace:
         headers['X-Workspace-ID'] = workspace
-    with OPENER.open(urllib.request.Request(API + path, headers=headers), timeout=5) as response:
+    data = None
+    if payload is not None:
+        headers['Content-Type'] = 'application/json'
+        data = json.dumps(payload).encode()
+    with OPENER.open(urllib.request.Request(API + path, headers=headers, data=data), timeout=5) as response:
         if complete and (response.headers.get('X-Comments-Truncated', '').lower() == 'true'
                          or response.headers.get('X-Multica-Next-Before')
                          or response.headers.get('X-Multica-Next-Before-Id')):
@@ -203,6 +212,36 @@ def expect_initial_sync(binding):
     raise SystemExit('E2E FAIL: successful initial sync missing for the exact Run.')
 
 
+def post_note(issue_path, token, workspace, body):
+    result = api_request(issue_path + '/comments', token, workspace,
+                         payload={'content': body, 'type': 'comment'})
+    source_id = result.get('id') if isinstance(result, dict) else None
+    require(isinstance(source_id, str) and UUID.fullmatch(source_id),
+            'test note did not return a valid source ID')
+    return source_id
+
+
+def expect_issue_note(issue, source_id, body, discussion):
+    for _ in range(30):
+        events = [e for e in outbox_records()
+                  if e.get('kind') == 'comment' and e.get('issue_id') == issue
+                  and e.get('source_id') == source_id]
+        if events:
+            require(len(events) == 1, 'duplicate events for synthetic human note')
+            e = events[0]
+            require(e.get('run_id') == 'issue-context' and not e.get('run_input')
+                    and e.get('body') == body and e.get('discussion') == discussion,
+                    'synthetic human note was not classified as expected')
+            try:
+                created_at = datetime.fromisoformat(e.get('created_at', '').replace('Z', '+00:00'))
+                require(created_at.utcoffset() is not None, 'note created_at has no timezone')
+            except (AttributeError, ValueError):
+                require(False, 'synthetic human note has no parseable created_at')
+            return
+        time.sleep(1)
+    raise SystemExit('E2E FAIL: synthetic human note did not reach Issue context.')
+
+
 def expect_inbox_cleaned(issue_id, request_id):
     path = MAIL / 'inbox' / issue_id / (request_id + '.json')
     for _ in range(20):
@@ -227,6 +266,16 @@ def smoke(token):
             'expected exact scoped Run to be running; no Inbox action written')
     print('Task claimed and read:', issue, run, 'epoch', e['epoch'])
     expect_initial_sync(e)
+
+    excerpts = (('/note [mab-context] ', 'ordinary'), ('/note ', None))
+    for prefix, discussion in excerpts:
+        note = prefix + MARKER + ': ' + uuid.uuid4().hex
+        note_id = post_note(path, token, workspace, note)
+        expect_issue_note(issue, note_id, note, discussion)
+    current_runs = get(path + '/task-runs', token, workspace)
+    require({r.get('id') for r in current_runs} == {r.get('id') for r in runs},
+            'synthetic human note unexpectedly created a Run')
+    print('Issue context verified for marked and unmarked human notes without creating a Run:', issue)
 
     body = MARKER + ': ordinary smoke reply ' + uuid.uuid4().hex
     request_id = submit(e, 'reply', body)

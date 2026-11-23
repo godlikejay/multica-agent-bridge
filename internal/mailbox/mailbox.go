@@ -50,22 +50,33 @@ type Message struct {
 	ObservedAt   string    `json:"observed_at,omitempty"`
 	LastSyncedAt string    `json:"last_synced_at,omitempty"`
 	InputIDs     *[]string `json:"input_ids,omitempty"`
+	BodyRef      string    `json:"body_ref,omitempty"`
+	Discussion   string    `json:"discussion,omitempty"`
+	CreatedAt    string    `json:"created_at,omitempty"`
 }
 type State struct {
 	Scope
-	Version      int               `json:"version"`
-	IssueID      string            `json:"issue_id"`
-	RunID        string            `json:"run_id"`
-	Epoch        uint64            `json:"epoch"`
-	TaskEvent    *Message          `json:"task_event,omitempty"`
-	Completion   string            `json:"completion,omitempty"`
-	Seen         map[string]string `json:"seen"`
-	Actions      map[string]Action `json:"actions"`
-	RetiredRuns  map[string]bool   `json:"retired_runs,omitempty"`
-	Sync         *Message          `json:"sync,omitempty"`
-	SyncSequence uint64            `json:"sync_sequence,omitempty"`
-	LastSyncedAt string            `json:"last_synced_at,omitempty"`
+	Version      int                   `json:"version"`
+	IssueID      string                `json:"issue_id"`
+	RunID        string                `json:"run_id"`
+	Epoch        uint64                `json:"epoch"`
+	TaskEvent    *Message              `json:"task_event,omitempty"`
+	Completion   string                `json:"completion,omitempty"`
+	Seen         map[string]string     `json:"seen"`
+	Actions      map[string]Action     `json:"actions"`
+	RetiredRuns  map[string]bool       `json:"retired_runs,omitempty"`
+	Sync         *Message              `json:"sync,omitempty"`
+	SyncSequence uint64                `json:"sync_sequence,omitempty"`
+	LastSyncedAt string                `json:"last_synced_at,omitempty"`
+	CommentRefs  map[string]CommentRef `json:"comment_refs,omitempty"`
+	ReadBodies   map[string]bool       `json:"read_comment_bodies,omitempty"`
 }
+type CommentRef struct {
+	Body    string `json:"body"`
+	Run     string `json:"run"`
+	Pending bool   `json:"pending,omitempty"`
+}
+
 type Action struct {
 	Digest         string      `json:"digest"`
 	Receipt        Message     `json:"receipt"`
@@ -316,7 +327,7 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if m.Kind != "reply" && m.Kind != "complete" {
 			continue
 		}
-		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" || m.InputIDs != nil {
+		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" || m.InputIDs != nil || m.BodyRef != "" || m.Discussion != "" || m.CreatedAt != "" {
 			continue
 		}
 		results = append(results, Input{m, ID(string(raw))})
@@ -396,54 +407,133 @@ func (b Box) RemoveDelivered(issueID, requestID, digest string) error {
 	return shelf.Sync()
 }
 
-// PruneAcknowledgedComments is called only after Seen is durable, so a
-// crash after unlinking a comment cannot cause it to be delivered again.
-func (b Box) PruneAcknowledgedComments(issueID string, seen map[string]string) error {
-	if !validID.MatchString(issueID) {
+// CleanComments keeps Issue reads and Run input acknowledgments independent.
+// The per-Issue writer owns both references and their garbage collection.
+func (b Box) CleanComments(s *State, cancelled []string) error {
+	if !validID.MatchString(s.IssueID) {
 		return errors.New("invalid acknowledgment issue id")
 	}
-	base := filepath.Join(b.dir("outbox"), ".acks")
-	for _, dir := range []string{base, filepath.Join(base, issueID)} {
-		if err := realDir(dir); errors.Is(err, os.ErrNotExist) {
-			return nil
-		} else if err != nil {
+	outbox := b.dir("outbox")
+	dir := filepath.Join(".acks", s.IssueID)
+	ackDir := filepath.Join(outbox, dir)
+	var entries []os.DirEntry
+	if err := realDir(filepath.Join(outbox, ".acks")); err == nil {
+		if err = realDir(ackDir); err == nil {
+			entries, err = os.ReadDir(ackDir)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	root, err := os.OpenRoot(b.dir("outbox"))
+	if len(entries) == 0 && len(s.CommentRefs) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(outbox)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	dir := filepath.Join(".acks", issueID)
-	entries, err := os.ReadDir(filepath.Join(b.dir("outbox"), dir))
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	eligible := make(map[string]bool, len(seen))
-	for _, id := range seen {
-		eligible[id] = true
-	}
-	for _, e := range entries {
-		id, ok := strings.CutSuffix(e.Name(), ".ack")
-		if !ok || !eligible[id] || !validID.MatchString(id) || e.Type() != 0 {
-			continue
-		}
-		name := id + ".json"
+	remove := func(name string) error {
 		if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if err := syncDir(b.dir("outbox")); err != nil {
-			return err
+		return nil
+	}
+	eligible, canonical := map[string]bool{}, map[string]bool{}
+	if len(entries) > 0 {
+		for key, id := range s.Seen {
+			eligible[id] = true
+			if strings.HasPrefix(key, "issue-comment:") {
+				canonical[id] = true
+			}
 		}
-		if err := root.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+	}
+	acked, bodies := map[string]bool{}, map[string]bool{}
+	readChanged := false
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".ack")
+		if !ok || !validID.MatchString(id) || !eligible[id] || e.Type() != 0 {
+			continue
+		}
+		acked[id] = true
+		if canonical[id] {
+			bodies[id] = true
+			if !s.ReadBodies[id] {
+				if s.ReadBodies == nil {
+					s.ReadBodies = map[string]bool{}
+				}
+				s.ReadBodies[id] = true
+				readChanged = true
+			}
+		}
+	}
+	if readChanged {
+		if err := b.Save(*s); err != nil {
 			return err
 		}
 	}
-	return syncDir(filepath.Join(b.dir("outbox"), dir))
+	stopped := map[string]bool{}
+	for _, run := range cancelled {
+		stopped[run] = true
+	}
+	protected := map[string]bool{}
+	var release []string
+	for id, ref := range s.CommentRefs {
+		if !validID.MatchString(id) || !validID.MatchString(ref.Body) {
+			return errors.New("invalid saved comment reference")
+		}
+		if !acked[id] && !stopped[ref.Run] {
+			// The reference is saved before it is published. A process crash
+			// in that interval must not release its body on next startup.
+			protected[ref.Body] = true
+			continue
+		}
+		if err := remove(id + ".json"); err != nil {
+			return err
+		}
+		release = append(release, id)
+		if s.ReadBodies[ref.Body] {
+			bodies[ref.Body] = true
+		}
+	}
+	for id := range bodies {
+		if !protected[id] {
+			if err := remove(id + ".json"); err != nil {
+				return err
+			}
+		}
+	}
+	for id := range acked {
+		if !canonical[id] {
+			if err := remove(id + ".json"); err != nil {
+				return err
+			}
+		}
+	}
+	if len(bodies) > 0 || len(acked) > 0 || len(release) > 0 {
+		if err := syncDir(outbox); err != nil {
+			return err
+		}
+	}
+	for _, id := range release {
+		delete(s.CommentRefs, id)
+	}
+	if len(release) > 0 {
+		if err := b.Save(*s); err != nil {
+			return err
+		}
+	}
+	for id := range acked {
+		if err := remove(filepath.Join(dir, id+".ack")); err != nil {
+			return err
+		}
+	}
+	if len(acked) > 0 {
+		return syncDir(ackDir)
+	}
+	return nil
 }
 
 func atomicJSON(path string, v any) error {

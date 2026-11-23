@@ -562,7 +562,8 @@ print(json.dumps(rows[connection]))
         self.event("task-2", "task", run_id="run-2", epoch=2, issue_key="FIX-1", body="current task")
         self.event("trigger-event", "comment", run_id="run-2", epoch=2, run_input="trigger", body="current input")
         self.event("coalesced-event", "comment", run_id="run-2", epoch=2, run_input="coalesced", body="also required")
-        self.event("uncertain-context", "comment", run_id="run-2", epoch=2, body="background")
+        self.event("uncertain-context", "comment", run_id="run-2", epoch=2, body="unknown")
+        self.event("older-ordinary", "comment", discussion="ordinary", body="verified background")
         self.assertEqual(self.invoke("runs"), {"runs": [
             {"issue": "FIX-1", "target": "task-2", "title": "current task", "status": "syncing"}],
             "upstream_queue": "unknown"})
@@ -576,7 +577,7 @@ print(json.dumps(rows[connection]))
         bundle = self.invoke("take", "FIX-1")
         self.assertEqual(bundle["status"], "ready")
         self.assertEqual([e["target"] for e in bundle["inputs"]], manifest)
-        self.assertEqual({e["target"] for e in bundle["background"]}, {"uncertain-context", "comment-1"})
+        self.assertEqual({e["target"] for e in bundle["background"]}, {"older-ordinary"})
         self.assertEqual(bundle["ackable"], ["task-2", *manifest])
         current = self.invoke("current")
         self.assertEqual((current["target"], current["title"]), ("task-2", "current task"))
@@ -611,6 +612,61 @@ print(json.dumps(rows[connection]))
         self.assertEqual(self.invoke("take", "FIX-1")["status"], "syncing")
         self.event("zero", "sync", status="recovered", revision="3", input_ids=[])
         self.assertEqual(self.invoke("take", "FIX-1")["inputs"], [])
+
+    def test_issue_discussion_is_distinct_from_run_input_and_ack(self):
+        (self.outbox / "comment-1.json").unlink()
+        self.event("task-B", "task", run_id="run-B", epoch=2, issue_key="FIX-1", body="assigned")
+        for name, second, flags in (("B", 1, {}), ("C", 2, {}), ("I2", 3, {"discussion": "ordinary"}), ("D", 4, {})):
+            self.event("issue-" + name, "comment", run_id="issue-context", source_id="source-" + name,
+                       revision="1", body=name, created_at=f"2026-11-23T03:00:0{second}Z", **flags)
+        self.event("input-B", "comment", run_id="run-B", epoch=2, source_id="source-B", revision="1",
+                   run_input="trigger", body_ref="issue-B")
+        self.event("input-C", "comment", run_id="run-B", epoch=2, source_id="source-C", revision="1",
+                   run_input="coalesced", body_ref="issue-C")
+        self.event("ready", "sync", run_id="run-B", epoch=2, status="healthy", input_ids=["input-B", "input-C"])
+        discussion = self.invoke("comments", "FIX-1")
+        self.assertEqual([item["text"] for item in discussion["comments"]], ["B", "C", "I2", "D"])
+        self.assertEqual([item["discussion"] for item in discussion["comments"]],
+                         ["unknown", "unknown", "ordinary", "unknown"])
+        filtered = self.invoke("comments", "FIX-1", "--context")
+        self.assertEqual([item["text"] for item in filtered["comments"]], ["I2"])
+        self.assertFalse((self.root / "pickup").exists())
+        take = self.invoke("take", "FIX-1")
+        self.assertEqual([item["text"] for item in take["inputs"]], ["B", "C"])
+        self.assertEqual([item["text"] for item in take["background"]], ["I2"])
+        self.assertEqual(self.invoke("read", "input-B")["body"], "B")
+        self.assertEqual(self.invoke("show", "input-B")["text"], "B")
+        self.assertIn("not an actionable Run", self.invoke("draft", "issue-D", "--kind", "reply",
+                                                          "--body-file", self.body, success=False))
+        self.assertIn("fully delivered", self.invoke("ack-take", "task-B", "issue-B", success=False))
+        self.invoke("ack", "issue-B")
+        self.assertEqual([item["text"] for item in self.invoke("comments", "FIX-1")["comments"]], ["C", "I2", "D"])
+        self.assertIn("input-B", self.invoke("take", "FIX-1")["ackable"])
+        self.assertTrue((self.outbox / ".acks" / "issue-1" / "issue-B.ack").is_file())
+        self.assertFalse((self.outbox / ".acks" / "issue-1" / "input-B.ack").exists())
+        (self.outbox / "issue-B.json").unlink()
+        self.assertEqual(self.invoke("take", "FIX-1")["status"], "input_unavailable")
+
+    def test_discussion_pages_are_chronological_and_late_events_remain_unread(self):
+        (self.outbox / "comment-1.json").unlink()
+        for name, second in (("last", 5), ("first", 1), ("middle", 3)):
+            self.event(name, "comment", run_id="issue-context", source_id=name, revision="1", body=name,
+                       created_at=f"2026-11-23T03:00:0{second}Z")
+        first = self.invoke("comments", "FIX-1", "--limit", 2)
+        self.assertEqual([event["target"] for event in first["comments"]], ["first", "middle"])
+        self.invoke("ack", "first")
+        self.invoke("ack", "middle")
+        (self.outbox / "middle.json").unlink()  # cursor remains usable after cleanup
+        self.event("late", "comment", run_id="issue-context", source_id="late", revision="1", body="late",
+                   created_at="2026-11-23T03:00:00Z")
+        second = self.invoke("comments", "FIX-1", "--after", first["next"])
+        self.assertEqual([event["target"] for event in second["comments"]], ["last"])
+        self.assertNotIn("next", second)
+        delta = self.invoke("comments", "FIX-1")
+        self.assertEqual([event["target"] for event in delta["comments"]], ["late", "last"])
+        self.event("task-new", "task", issue_id="different", issue_key="FIX-2")
+        self.assertIn("invalid comments cursor", self.invoke("comments", "FIX-2", "--after",
+                                                           first["next"], success=False))
 
     def test_root_override_does_not_inherit_routes(self):
         self.scoped_fixture("cloud", LINE_A)

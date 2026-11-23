@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/godlikejay/multica-agent-bridge/internal/mailbox"
@@ -107,7 +108,7 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
-	if err = b.Box.PruneAcknowledgedComments(s.IssueID, s.Seen); err != nil {
+	if err = b.Box.CleanComments(&s, t.CancelledRunIDs); err != nil {
 		return "", err
 	}
 	if s.Completion != "" {
@@ -206,42 +207,15 @@ poll:
 			if own {
 				continue
 			}
-			source := mailbox.ID("source", c.ID, c.Revision, c.Body)
-			k := source
-			role := t.RunInputRole(c.ID)
-			if role != "" {
-				// A comment observed by an earlier run can still be an explicit
-				// input of this run. Keep a separate immutable delivery record.
-				k = mailbox.ID("run-input", b.RunID, role, source)
+			id, e := b.emitComment(&s, base, c, t.RunInputRole(c.ID))
+			if e != nil {
+				return "", e
 			}
-			if id := s.Seen[k]; id != "" {
-				if role != "" {
-					observedInputs[c.ID] = id
-				}
-				continue
-			}
-			m := base
-			m.Kind = "comment"
-			m.ID = mailbox.ID("comment", t.IssueID, b.RunID, k)
-			m.SourceID = c.ID
-			m.Revision = c.Revision
-			m.RunInput = role
-			m.Body = c.Body
-			if err = b.Box.Emit(m); err != nil {
-				return "", err
-			}
-			s.Seen[k] = m.ID
-			if role != "" {
-				observedInputs[c.ID] = m.ID
-			}
-			if s.Seen[source] == "" {
-				s.Seen[source] = m.ID
-			}
-			if err = b.Box.Save(s); err != nil {
-				return "", err
+			if id != "" {
+				observedInputs[c.ID] = id
 			}
 		}
-		if err = b.Box.PruneAcknowledgedComments(s.IssueID, s.Seen); err != nil {
+		if err = b.Box.CleanComments(&s, t.CancelledRunIDs); err != nil {
 			return "", err
 		}
 		manifest := readyInputs(t.DeliveredCommentIDs, observedInputs)
@@ -441,6 +415,74 @@ func wait(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// Issue comments have stable identity independently of the observing Run.
+// Run input edges refer to that body and have their own acknowledgment.
+func (b Bridge) emitComment(s *mailbox.State, base mailbox.Message, c multica.Comment, role string) (string, error) {
+	source := mailbox.ID("source", c.ID, c.Revision, c.Body)
+	bodyKey := "issue-comment:" + source
+	bodyID := mailbox.ID("issue-comment", s.IssueID, source)
+	runKey := mailbox.ID("run-input", base.RunID, role, source)
+	runID := ""
+	if role != "" {
+		runID = s.Seen[runKey]
+	}
+	needsRef := role != "" && (runID == "" || s.CommentRefs[runID].Pending)
+	// An already-read body can be fetched again when it is assigned to a new
+	// Run. Its stable ID preserves the separate Issue read acknowledgment.
+	if s.Seen[bodyKey] == "" || needsRef {
+		m := mailbox.Message{Version: 1, Kind: "comment", ID: bodyID, IssueID: s.IssueID,
+			RunID: "issue-context", Epoch: 1, Body: c.Body, SourceID: c.ID, Revision: c.Revision, CreatedAt: c.CreatedAt}
+		if backgroundNote(c.Body) {
+			m.Discussion = "ordinary"
+		}
+		if err := b.Box.Emit(m); err != nil {
+			return "", err
+		}
+		s.Seen[bodyKey] = bodyID
+		if err := b.Box.Save(*s); err != nil {
+			return "", err
+		}
+	}
+	if !needsRef {
+		return runID, nil
+	}
+	m := base
+	m.Kind = "comment"
+	m.ID = mailbox.ID("comment", s.IssueID, base.RunID, runKey)
+	m.SourceID, m.Revision, m.CreatedAt = c.ID, c.Revision, c.CreatedAt
+	m.RunInput, m.BodyRef = role, bodyID
+	if s.CommentRefs == nil {
+		s.CommentRefs = map[string]mailbox.CommentRef{}
+	}
+	ref := mailbox.CommentRef{Run: base.RunID, Body: bodyID, Pending: true}
+	s.CommentRefs[m.ID] = ref
+	s.Seen[runKey] = m.ID
+	if err := b.Box.Save(*s); err != nil {
+		return "", err
+	}
+	if err := b.Box.Emit(m); err != nil {
+		return "", err
+	}
+	ref.Pending = false
+	s.CommentRefs[m.ID] = ref
+	if err := b.Box.Save(*s); err != nil {
+		return "", err
+	}
+	return m.ID, nil
+}
+
+// Upstream reserves the first token for human-only notes. A second explicit
+// marker opts this note into MAB context without making it a Run trigger.
+func backgroundNote(body string) bool {
+	body = strings.TrimLeft(body, " \t\r\n")
+	end := strings.IndexFunc(body, unicode.IsSpace)
+	if end < 0 || !strings.EqualFold(body[:end], "/note") {
+		return false
+	}
+	fields := strings.Fields(body[end:])
+	return len(fields) != 0 && fields[0] == "[mab-context]"
 }
 
 // Absence is different from a definite empty claim. A successful API read

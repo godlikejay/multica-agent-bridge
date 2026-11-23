@@ -41,9 +41,9 @@ func (c Config) GoString() string { return c.String() }
 type Task struct {
 	IssueID, IssueKey, Title, Description, TriggerCommentID, AgentID string
 	AllowedParents                                                   []string
-	DeliveredCommentIDs                                              []string
+	DeliveredCommentIDs, CancelledRunIDs                             []string
 }
-type Comment struct{ ID, IssueID, Body, Revision, AuthorID, AuthorType, SourceTaskID, ParentID, DeletedAt string }
+type Comment struct{ ID, IssueID, Body, Revision, AuthorID, AuthorType, SourceTaskID, ParentID, DeletedAt, CreatedAt string }
 
 // RunInputRole consults the claim receipt when available. An empty delivered
 // list is authoritative; only older responses fall back to the planned IDs.
@@ -219,6 +219,7 @@ type wireTask struct {
 func cloneTask(t Task) Task {
 	t.AllowedParents = slices.Clone(t.AllowedParents)
 	t.DeliveredCommentIDs = slices.Clone(t.DeliveredCommentIDs)
+	t.CancelledRunIDs = slices.Clone(t.CancelledRunIDs)
 	return t
 }
 
@@ -231,6 +232,7 @@ func (c *Client) Task(ctx context.Context) (Task, error) {
 	cursor := ""
 	seen := map[string]bool{}
 	total := 0
+	var cancelled []wireTask
 	for page := 0; page < maxPages; page++ {
 		q := url.Values{"limit": {"200"}}
 		if cursor != "" {
@@ -247,6 +249,9 @@ func (c *Client) Task(ctx context.Context) (Task, error) {
 		}
 		var found *wireTask
 		for i := range rows {
+			if rows[i].Status == "cancelled" {
+				cancelled = append(cancelled, rows[i])
+			}
 			if rows[i].ID == c.cfg.RunID {
 				if found != nil {
 					return Task{}, fail("ambiguous_task")
@@ -272,6 +277,11 @@ func (c *Client) Task(ctx context.Context) (Task, error) {
 				return Task{}, fail("unsupported_task")
 			}
 			task := Task{IssueID: t.IssueID, TriggerCommentID: t.Trigger, AgentID: t.AgentID, DeliveredCommentIDs: t.Delivered}
+			for _, row := range cancelled {
+				if validID(row.ID) && row.IssueID == t.IssueID && row.WorkspaceID == t.WorkspaceID && row.AgentID == t.AgentID {
+					task.CancelledRunIDs = append(task.CancelledRunIDs, row.ID)
+				}
+			}
 			for _, id := range task.DeliveredCommentIDs {
 				if !validID(id) {
 					return Task{}, fail("invalid_response")
@@ -353,6 +363,7 @@ type wireComment struct {
 	ParentID     string `json:"parent_id"`
 	DeletedAt    string `json:"deleted_at"`
 	SourceTaskID string `json:"source_task_id"`
+	CreatedAt    string `json:"created_at"`
 }
 
 // Comments obtains complete recent-thread pages. Oversized/partial threads are
@@ -387,7 +398,11 @@ func (c *Client) Comments(ctx context.Context, issueID string) ([]Comment, error
 				continue
 			}
 			ids[r.ID] = true
-			result = append(result, Comment{ID: r.ID, IssueID: r.IssueID, Body: r.Content, Revision: strconv.FormatInt(r.Revision, 10), AuthorID: r.AuthorID, AuthorType: r.AuthorType, SourceTaskID: r.SourceTaskID, ParentID: r.ParentID, DeletedAt: r.DeletedAt})
+			createdAt := ""
+			if when, err := time.Parse(time.RFC3339Nano, r.CreatedAt); err == nil {
+				createdAt = when.UTC().Format(time.RFC3339Nano)
+			}
+			result = append(result, Comment{ID: r.ID, IssueID: r.IssueID, Body: r.Content, Revision: strconv.FormatInt(r.Revision, 10), AuthorID: r.AuthorID, AuthorType: r.AuthorType, SourceTaskID: r.SourceTaskID, ParentID: r.ParentID, DeletedAt: r.DeletedAt, CreatedAt: createdAt})
 		}
 		before, id := headers.Get("X-Multica-Next-Before"), headers.Get("X-Multica-Next-Before-Id")
 		if before == "" && id == "" {

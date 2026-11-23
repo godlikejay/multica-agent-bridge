@@ -33,13 +33,15 @@ ACP prompt. An event is an observation, not permission to act.
 
 - `task`: initial snapshot for the run; `issue_key` and `body` hold display
   metadata and issue text.
-- `comment`: `source_id`, `revision`, `body` for a newly observed comment
-  version. When Multica assigns it to this Run, `run_input` is `trigger` or
-  `coalesced`. The Daemon claim receipt (`delivered_comment_ids`) is authoritative
-  even when empty. Only responses without it fall back to planned trigger and
-  coalesced IDs. Run inputs are emitted even if seen as context earlier;
-  ordinary context is deduplicated across Runs. No deletion events or audit
-  completeness guarantees in this build.
+- `comment`: one immutable body per Issue and remote comment revision.
+  The Issue body carries `source_id`, `revision`, remote `created_at` when
+  provided, and the reserved non-actionable binding `issue-context` / epoch 1.
+  A Multica Run input separately has `run_input` (`trigger` or `coalesced`)
+  and `body_ref` to the exact local Issue comment event. Its scope, Issue,
+  source ID and revision must match the body. Only the authoritative Daemon
+  claim receipt (`delivered_comment_ids`) establishes ready inputs for pickup.
+  Older responses may expose planned IDs for compatibility, but do not
+  declare a ready manifest. No deletion or audit completeness guarantee.
 - `receipt`: `request_id`, `status`, and `remote_id` when a posted comment
   was verified. Receipt status describes what the Bridge knows, not the entire
   remote Run state.
@@ -55,26 +57,36 @@ ACP prompt. An event is an observation, not permission to act.
   means no assigned comments. A missing field, unavailable input event, or
   newer degraded observation prevents pickup.
 
-An explicit local `ack EVENT_ID` allows the Bridge to remove a comment
-after it has recorded delivery in private state. The Bridge consumes the
-acknowledgment while an Issue worker is running (including on a later Run).
-Reading or listing does not acknowledge anything. Submit any requested direct
-reply before acknowledging its source comment. Active task snapshots, sync
-and action receipts still support routing, status and delivery recovery;
-they are not pruned by comment acknowledgment.
+### Local pickup and comment disposal
 
-### Local Run pickup
+`take` selects an already delivered Run locally. It does not call Multica,
+start work, automatically acknowledge any content, or change write permissions.
+The selected Run never silently switches. Remote queue or presence is not
+inferred from comments. `comments ISSUE` pages through cached Issue comments
+without taking a Run or marking comments read. Use `--context` for only
+eligible background during an active Run. Use a new read to pick up newly
+synced comments between pages; the same cache is not a remote history API.
 
-The mailbox client lists known local Run deliveries without claiming or
-acknowledging any of them. The downstream agent explicitly takes a ready Run;
-this selects that exact Run locally and does not call Multica, start an agent,
-or change posting permissions. A selected Run never silently switches to its
-replacement. Pickup returns separately the authoritative inputs and unread
-Issue context; non-input comments are context, not proof of which Run they
-might be queued for. Batch acknowledgment only applies to entries actually
-delivered in the selected Run bundle, not background or a later Run. A
-known local delivery does not establish live remote presence. The remote
-queue is reported as unknown without an authoritative scoped view.
+Pickup distinguishes exact Run inputs from unread background. Multica's
+GET comments does not expose the UI's no-trigger selection. Only an explicit
+`/note [mab-context]` is eligible for automatic background in this version:
+`/note` suppresses the native trigger, and the second token opts into MAB
+context. Plain notes and unclassified comments remain in Issue view only.
+Never infer future Run affiliation by timestamp or missing links.
+
+Acknowledge the exact Issue body and exact Run reference separately. The
+Bridge removes a read body only once no outstanding Run reference needs it;
+a future claim may rehydrate the same body without making it unread again.
+Run acknowledgment clears its reference, never an unread Issue body. If
+Multica returns a definite cancelled status for an exact prior Run in the
+same Issue, agent and workspace, the Bridge can retire its input references
+without consuming Issue discussion. An unconfirmed end or missing record
+does not retire references; this is not an idle cancellation watcher.
+Cleanup runs when an Issue worker is active. No time-based expiry or archive.
+
+Submit an authorized direct reply to a Run input before acknowledging it.
+Issue-context records are not direct reply targets. Task snapshots, sync
+and operational receipts are not pruned by comment acknowledgment.
 
 ## Inbox
 
