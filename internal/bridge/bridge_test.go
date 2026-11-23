@@ -571,6 +571,75 @@ func (r *recoveryRemote) totalReads() int {
 	return r.reads
 }
 
+type manifestRemote struct {
+	recoveryRemote
+	inputs []string
+}
+
+func (r *manifestRemote) Task(ctx context.Context) (multica.Task, error) {
+	t, err := r.recoveryRemote.Task(ctx)
+	t.DeliveredCommentIDs = r.inputs
+	if len(r.inputs) > 0 {
+		t.TriggerCommentID = r.inputs[0]
+	}
+	return t, err
+}
+
+func TestRunInputManifestWaitsForExactCompleteRead(t *testing.T) {
+	box := mailbox.Box{Root: t.TempDir()}
+	background := multica.Comment{ID: "B", Revision: "1", Body: "background"}
+	a := &manifestRemote{inputs: []string{}}
+	a.snapshotAfter([]multica.Comment{background}, nil)
+	_, errs, stop := run(t, box, a, "A")
+	old := await(t, box, func(m mailbox.Message) bool { return m.Kind == "sync" && m.RunID == "A" })
+	if old.InputIDs == nil || len(*old.InputIDs) != 0 {
+		t.Fatalf("expected definite empty manifest, got %+v", old)
+	}
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+
+	c := multica.Comment{ID: "C", Revision: "1", Body: "trigger"}
+	d := multica.Comment{ID: "D", Revision: "1", Body: "coalesced", DeletedAt: "tombstone"}
+	next := &manifestRemote{inputs: []string{"C", "D"}}
+	next.snapshotAfter([]multica.Comment{background, c, d}, nil)
+	_, errs, stop = run(t, box, next, "C-run")
+	incomplete := await(t, box, func(m mailbox.Message) bool { return m.Kind == "sync" && m.RunID == "C-run" })
+	if incomplete.InputIDs != nil {
+		t.Fatal("successful scan alone should not mark input ready")
+	}
+	d.DeletedAt = ""
+	next.snapshotAfter([]multica.Comment{background, d, c}, nil)
+	ready := await(t, box, func(m mailbox.Message) bool { return m.Kind == "sync" && m.RunID == "C-run" && m.InputIDs != nil })
+	if len(*ready.InputIDs) != 2 {
+		t.Fatalf("expected two exact input events: %+v", *ready.InputIDs)
+	}
+	for i, source := range []string{"C", "D"} {
+		id := (*ready.InputIDs)[i]
+		event := await(t, box, func(m mailbox.Message) bool { return m.ID == id })
+		role := []string{"trigger", "coalesced"}[i]
+		if event.Kind != "comment" || event.RunID != ready.RunID || event.Epoch != ready.Epoch ||
+			event.SourceID != source || event.RunInput != role {
+			t.Fatalf("wrong manifest item: %+v", event)
+		}
+	}
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	// Persisted sync with a slice-valued manifest can be emitted again by
+	// the same writer after a restart without conflicting with itself.
+	_, errs, stop = run(t, box, next, "C-run")
+	base := task(t, box, "C-run")
+	input(t, box, base, "after-restart", "reply", "fixture")
+	receipt(t, box, "after-restart", "reply_posted")
+	stop()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
 func TestReadRecoveryIsBoundedAndNeverPostsWhileDegraded(t *testing.T) {
 	box := mailbox.Box{Root: t.TempDir()}
 	bad := &recoveryRemote{readErr: &multica.Error{Code: "transport"}}

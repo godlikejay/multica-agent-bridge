@@ -556,6 +556,62 @@ print(json.dumps(rows[connection]))
         finally:
             os.close(fd)
 
+    def test_take_requires_exact_ready_manifest_and_preserves_background(self):
+        manifest = ["trigger-event", "coalesced-event"]
+        self.event("old-ready", "sync", status="healthy", revision="1", input_ids=[])
+        self.event("task-2", "task", run_id="run-2", epoch=2, issue_key="FIX-1", body="current task")
+        self.event("trigger-event", "comment", run_id="run-2", epoch=2, run_input="trigger", body="current input")
+        self.event("coalesced-event", "comment", run_id="run-2", epoch=2, run_input="coalesced", body="also required")
+        self.event("uncertain-context", "comment", run_id="run-2", epoch=2, body="background")
+        self.assertEqual(self.invoke("runs"), {"runs": [
+            {"issue": "FIX-1", "target": "task-2", "title": "current task", "status": "syncing"}],
+            "upstream_queue": "unknown"})
+        self.assertEqual(self.invoke("take", "FIX-1")["status"], "syncing")
+        self.assertEqual(self.invoke("current")["status"], "no_current")
+        self.assertFalse((self.root / ".local").exists())
+        self.event("new-unavailable", "sync", run_id="run-2", epoch=2, status="healthy", revision="2")
+        self.assertEqual(self.invoke("take", "FIX-1")["status"], "input_unavailable")
+        self.event("new-ready", "sync", run_id="run-2", epoch=2, status="recovered", revision="3", input_ids=manifest)
+        self.assertIn("superseded", self.invoke("take", "task-1", success=False))
+        bundle = self.invoke("take", "FIX-1")
+        self.assertEqual(bundle["status"], "ready")
+        self.assertEqual([e["target"] for e in bundle["inputs"]], manifest)
+        self.assertEqual({e["target"] for e in bundle["background"]}, {"uncertain-context", "comment-1"})
+        self.assertEqual(bundle["ackable"], ["task-2", *manifest])
+        current = self.invoke("current")
+        self.assertEqual((current["target"], current["title"]), ("task-2", "current task"))
+        self.assertEqual(self.invoke("runs")["current"], "task-2")
+        refusal = self.invoke("ack-take", "task-2", "trigger-event", "uncertain-context", success=False)
+        self.assertIn("fully delivered", refusal)
+        self.assertFalse((self.outbox / ".acks").exists())
+        self.assertEqual(self.invoke("ack-take", "task-2", "trigger-event", "coalesced-event")["count"], 2)
+        markers = self.outbox / ".acks" / "issue-1"
+        self.assertEqual({p.stem for p in markers.iterdir()}, set(manifest))
+        self.assertTrue((self.outbox / "uncertain-context.json").is_file())
+        for event_id in manifest:
+            (self.outbox / (event_id + ".json")).unlink()
+        self.assertEqual(self.invoke("current")["status"], "ready")
+        self.assertEqual(self.invoke("take", "FIX-1")["inputs"], [])
+        self.event("task-3", "task", run_id="run-3", epoch=3, issue_key="FIX-1")
+        self.assertEqual(self.invoke("current")["status"], "not_current")
+        self.assertIn("no longer current", self.invoke("ack-take", "task-2", "task-2", success=False))
+
+    def test_take_does_not_accept_missing_input_or_truncated_delivery(self):
+        self.event("ready", "sync", status="healthy", revision="1", input_ids=["expected"])
+        self.assertEqual(self.invoke("take", "FIX-1")["status"], "input_unavailable")
+        self.event("expected", "comment", run_input="trigger", body="long" * 300)
+        take = self.invoke("take", "FIX-1")
+        self.assertEqual(take["status"], "partial")
+        self.assertEqual(self.invoke("current")["status"], "partial")
+        self.assertTrue(take["inputs"][0]["truncated"])
+        self.assertNotIn("expected", take["ackable"])
+        self.assertIn("fully delivered", self.invoke("ack-take", "task-1", "expected", success=False))
+        self.assertIn("expected", self.invoke("take", "FIX-1", "--full")["ackable"])
+        self.event("retrying", "sync", status="retrying", revision="2")
+        self.assertEqual(self.invoke("take", "FIX-1")["status"], "syncing")
+        self.event("zero", "sync", status="recovered", revision="3", input_ids=[])
+        self.assertEqual(self.invoke("take", "FIX-1")["inputs"], [])
+
     def test_root_override_does_not_inherit_routes(self):
         self.scoped_fixture("cloud", LINE_A)
         project = self.project_tool("one")

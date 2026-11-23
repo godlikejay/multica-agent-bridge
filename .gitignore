@@ -8,5 +8,6 @@
 /.bridge-multi/
 mailbox.local.json
 /.local/mab.json
+/.local/mab-current.json
 .mailbox-config-*
 __pycache__/

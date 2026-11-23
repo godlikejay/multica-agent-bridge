@@ -34,6 +34,9 @@ class SmokeFixture(unittest.TestCase):
                           run_id=uid(2), body=f.MARKER + ': test')
         self.task = self.mail / 'outbox/test-event.json'
         self.task.write_text(json.dumps(self.event))
+        self.sync_event = dict(self.event, kind='sync', id='test-sync', status='healthy', input_ids=[])
+        self.sync = self.task.with_name('test-sync.json')
+        self.sync.write_text(json.dumps(self.sync_event))
 
     def test_task_marker_and_uniqueness(self):
         self.assertEqual(f.task_event(), self.event)
@@ -123,9 +126,27 @@ class SmokeFixture(unittest.TestCase):
 
     def test_smoke_verified_reply_then_exact_completion(self):
         out = self.run_smoke()
+        self.assertIn('Initial sync verified with no Run comment inputs:', out)
         self.assertIn('Ordinary reply verified remotely:', out)
         self.assertIn('Confirmed reply removed from Inbox:', out)
         self.assertIn('REAL MULTICA E2E PASS: exact Run completed: ' + self.event['run_id'], out)
+
+    def test_smoke_refuses_unbound_sync_before_write(self):
+        self.sync.write_text(json.dumps(dict(self.sync_event, run_id=uid(6))))
+        with (patch.object(f.time, 'sleep'),
+              self.assertRaisesRegex(SystemExit, 'successful initial sync missing for the exact Run')):
+            self.run_smoke()
+        self.assertEqual(list((self.mail / 'inbox').iterdir()), [])
+
+    def test_smoke_requires_explicit_empty_initial_run_input_ids(self):
+        incomplete = dict(self.sync_event)
+        del incomplete['input_ids']
+        for event in (incomplete, dict(self.sync_event, input_ids=['unexpected-input'])):
+            with self.subTest(event=event):
+                self.sync.write_text(json.dumps(event))
+                with self.assertRaisesRegex(SystemExit, 'expected explicit empty input_ids'):
+                    self.run_smoke()
+                self.assertEqual(list((self.mail / 'inbox').iterdir()), [])
 
     def test_smoke_expected_binding_before_write(self):
         with self.assertRaisesRegex(SystemExit, 'expected exact scoped Run'):

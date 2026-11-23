@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -31,23 +32,24 @@ type Scope struct {
 
 type Message struct {
 	Scope
-	Version      int    `json:"version"`
-	Kind         string `json:"kind"`
-	ID           string `json:"id"`
-	IssueID      string `json:"issue_id"`
-	RunID        string `json:"run_id"`
-	Epoch        uint64 `json:"epoch"`
-	Body         string `json:"body,omitempty"`
-	IssueKey     string `json:"issue_key,omitempty"`
-	SourceID     string `json:"source_id,omitempty"`
-	Revision     string `json:"revision,omitempty"`
-	RunInput     string `json:"run_input,omitempty"`
-	ParentID     string `json:"parent_id,omitempty"`
-	RequestID    string `json:"request_id,omitempty"`
-	Status       string `json:"status,omitempty"`
-	RemoteID     string `json:"remote_id,omitempty"`
-	ObservedAt   string `json:"observed_at,omitempty"`
-	LastSyncedAt string `json:"last_synced_at,omitempty"`
+	Version      int       `json:"version"`
+	Kind         string    `json:"kind"`
+	ID           string    `json:"id"`
+	IssueID      string    `json:"issue_id"`
+	RunID        string    `json:"run_id"`
+	Epoch        uint64    `json:"epoch"`
+	Body         string    `json:"body,omitempty"`
+	IssueKey     string    `json:"issue_key,omitempty"`
+	SourceID     string    `json:"source_id,omitempty"`
+	Revision     string    `json:"revision,omitempty"`
+	RunInput     string    `json:"run_input,omitempty"`
+	ParentID     string    `json:"parent_id,omitempty"`
+	RequestID    string    `json:"request_id,omitempty"`
+	Status       string    `json:"status,omitempty"`
+	RemoteID     string    `json:"remote_id,omitempty"`
+	ObservedAt   string    `json:"observed_at,omitempty"`
+	LastSyncedAt string    `json:"last_synced_at,omitempty"`
+	InputIDs     *[]string `json:"input_ids,omitempty"`
 }
 type State struct {
 	Scope
@@ -222,7 +224,7 @@ func (b Box) Emit(m Message) error {
 		return err
 	}
 	var previous Message
-	if json.Unmarshal(old, &previous) != nil || previous != m {
+	if json.Unmarshal(old, &previous) != nil || !reflect.DeepEqual(previous, m) {
 		return errors.New("conflicting outbox event")
 	}
 	return syncDir(b.dir("outbox"))
@@ -314,7 +316,7 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if m.Kind != "reply" && m.Kind != "complete" {
 			continue
 		}
-		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" {
+		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" || m.InputIDs != nil {
 			continue
 		}
 		results = append(results, Input{m, ID(string(raw))})

@@ -189,6 +189,20 @@ def receipt(request_id, expected, binding):
     raise SystemExit('E2E FAIL: receipt timeout; do not resend. Request: ' + request_id)
 
 
+def expect_initial_sync(binding):
+    for _ in range(30):
+        for e in outbox_records():
+            if (e.get('kind') != 'sync' or e.get('status') not in ('healthy', 'recovered')
+                    or not all(e.get(k) == binding[k] for k in BINDING)):
+                continue
+            require(e.get('input_ids') == [],
+                    'expected explicit empty input_ids for the new synthetic Run without comments')
+            print('Initial sync verified with no Run comment inputs:', binding['run_id'])
+            return
+        time.sleep(1)
+    raise SystemExit('E2E FAIL: successful initial sync missing for the exact Run.')
+
+
 def expect_inbox_cleaned(issue_id, request_id):
     path = MAIL / 'inbox' / issue_id / (request_id + '.json')
     for _ in range(20):
@@ -212,6 +226,7 @@ def smoke(token):
             and row.get('agent_id') and row.get('status') == 'running',
             'expected exact scoped Run to be running; no Inbox action written')
     print('Task claimed and read:', issue, run, 'epoch', e['epoch'])
+    expect_initial_sync(e)
 
     body = MARKER + ': ordinary smoke reply ' + uuid.uuid4().hex
     request_id = submit(e, 'reply', body)

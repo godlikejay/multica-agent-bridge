@@ -55,7 +55,7 @@ project with multiple workspaces. You can do this before the first task arrives.
 ```sh
 python3 "$skill/scripts/mailbox.py" setup /absolute/path/to/install/data \
   --route cloud:engineering --route cloud:operations
-python3 "$skill/scripts/mailbox.py" tasks
+python3 "$skill/scripts/mailbox.py" runs
 ```
 
 With a slug, setup queries the running Compose Bridge using the authenticated
@@ -89,31 +89,32 @@ root, explicit selectors outside the configured project routes are rejected.
 
 ## Use the mailbox day to day
 
-Ask the agent naturally, for example: “What Multica tasks have come in?”, “Read
-OPS-123 and summarize the latest requests,” or “Reply to OPS-123 that the fix
-is ready.” It uses the saved project workspaces without asking you for IDs or
-flags. If an issue key matches multiple workspaces, the tool refuses to guess.
-
-To use the same compact interface directly from a terminal:
+Ask the agent naturally: “What is my current Multica Run?”, “Which Runs
+were delivered to this project?”, “Take OPS-123,” or “Tell OPS-123 the fix
+is ready, but keep the Run open.” The agent uses the saved workspace routes.
+If an Issue key matches more than one scope, the tool refuses to guess.
 
 ```sh
 tool=.agents/skills/multica-bridge/scripts/mailbox.py
-python3 "$tool" tasks
-python3 "$tool" tasks OPS-123
-python3 "$tool" show OPS-123
-# Use the exact target returned by show, not the issue key, for an authorized write.
-python3 "$tool" reply TARGET 'The fix is ready.'
-# Use complete instead of reply when the operator has asked to end this Run.
-python3 "$tool" complete TARGET 'The fix is complete; checks passed.'
-# Only if the action is pending, check the request ID it returned.
+python3 "$tool" runs
+python3 "$tool" take OPS-123
+python3 "$tool" current
+# Use exact targets from take; run only the write the operator requested.
+python3 "$tool" reply TASK_TARGET 'The fix is ready.'
+# Or reply and request that this Run end.
+python3 "$tool" complete TASK_TARGET 'The fix is complete; checks passed.'
+# If delivery is still pending, check the returned request ID.
 python3 "$tool" result REQUEST_ID
 ```
 
-`tasks` summarizes the latest Run MAB received per Issue. It is not the whole
-Multica queue or live Run status. `show` expands one Issue or an exact event.
-For a reply to a particular comment, use the target for that comment. New
-Runs are not visible locally until handed to MAB; old replies and drafts
-never authorize work or a write on a new Run.
+`runs` is a read-only view of local deliveries, not Multica's server-side
+queue. `take` selects a ready Run locally, shows its assigned inputs separately
+from unread Issue context, and does not execute or acknowledge anything.
+`current` keeps that exact selection; it does not pick its replacement.
+Acknowledge only fully received inputs you no longer need to answer directly
+or to recover work. For local acknowledgment details see the [Skill](../skills/multica-bridge/SKILL.md).
+For a reply to a particular comment, use that comment's exact target.
+Keep the local selection file `.local/mab-current.json` out of Git.
 
 `reply` and `complete` submit actions immediately, so use them only where the
 operator explicitly approved the action. Both validate the exact event and

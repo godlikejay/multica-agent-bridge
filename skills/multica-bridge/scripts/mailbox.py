@@ -37,7 +37,7 @@ KINDS = {"reply", "complete"}
 TERMINAL = {"completion_requested"}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-COMPACT_COMMANDS = {"tasks", "show", "reply", "complete", "result"}
+COMPACT_COMMANDS = {"tasks", "show", "runs", "take", "current", "ack-take", "reply", "complete", "result"}
 
 
 class MailboxError(Exception):
@@ -702,18 +702,27 @@ def save_local_config(path, root, install_dir, values):
         os.close(fd)
     routes = resolve_setup_routes(root, install_dir, values)
     config = {"root": root, "routes": [scope_fields(pair) for pair in dict.fromkeys(routes)]}
+    save_project_json(path, config)
+    emit({"status": "configured", "config_path": str(path), **config})
+
+
+def save_project_json(path, record):
     path.parent.mkdir(mode=0o700, exist_ok=True)
     fd, staged = tempfile.mkstemp(prefix=".mailbox-config-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False)
+            json.dump(record, f, ensure_ascii=False)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(staged, path)
+        directory = os.open(path.parent, DIR_FLAGS)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(staged).unlink(missing_ok=True)
-    emit({"status": "configured", "config_path": str(path), **config})
 
 
 def list_events(root_fd, routes, args):
@@ -869,7 +878,179 @@ def action_receipts(outbox, request):
     return receipts
 
 
-def compact_command(root_fd, routes, args):
+def run_inputs(bound):
+    """Only the latest successful sync may assert a complete Run input set."""
+    if any(event["kind"] == "receipt" and event.get("status") in TERMINAL for _, event in bound):
+        return "completion_requested", ()
+    sync = max(((when, event) for when, event in bound if event["kind"] == "sync"),
+               key=lambda row: sync_order(*row), default=None)
+    if sync is None:
+        return "syncing", ()
+    status = sync[1].get("status")
+    if status not in ("healthy", "recovered"):
+        return "sync_failed" if status == "failed" else "syncing", ()
+    ids = sync[1].get("input_ids")
+    if not isinstance(ids, list) or not all(valid_id(i) for i in ids) or len(set(ids)) != len(ids):
+        return "input_unavailable", ()
+    return "ready", tuple(ids)
+
+
+def project_current(path, identity, routes):
+    try:
+        selected = json_file(path)
+    except FileNotFoundError:
+        return None
+    scope = selected.get("scope")
+    if (selected.get("root") != identity or not isinstance(scope, list)
+            or tuple(scope) not in routes):
+        return None
+    if (not valid_binding(selected) or not valid_id(selected.get("target"))
+            or type(selected.get("partial")) is not bool
+            or not isinstance(selected.get("ackable"), list)
+            or not all(valid_id(i) for i in selected["ackable"])):
+        raise MailboxError("invalid selected Run; take the Run again")
+    return selected
+
+
+def assigned_command(root_fd, routes, args, rows, current_path, identity):
+    tasks = latest_tasks(rows)
+    exact = {}
+    others = {}
+    for when, route, event in rows:
+        exact.setdefault((route, bind(event)), []).append((when, event))
+        if event["kind"] == "comment":
+            others.setdefault((route, event["issue_id"]), []).append((when, event))
+
+    def card(row):
+        _, route, task = row
+        status, ids = run_inputs(exact[(route, bind(task))])
+        directory = pickup_dir(root_fd, route)
+        try:
+            acked = set(read_pickup(directory, task["issue_id"])["acknowledged"])
+        finally:
+            if directory is not None:
+                os.close(directory)
+        comments = {event["id"]: event for _, event in exact[(route, bind(task))]
+                    if event["kind"] == "comment" and event.get("run_input") in ("trigger", "coalesced")}
+        if status == "ready" and any(i not in comments and i not in acked for i in ids):
+            status = "input_unavailable"
+        result = {"issue": task.get("issue_key") or task["issue_id"], "target": task["id"],
+                  "title": compact_body(task, 120)["text"].split("\n", 1)[0], "status": status}
+        if args.verbose:
+            result.update(metadata(task))
+        return result, ids, comments, acked
+
+    if args.command == "runs":
+        if args.issue is not None:
+            key = require_id(args.issue)
+            tasks = [row for row in tasks if key in (row[2]["issue_id"], row[2].get("issue_key"))]
+        limit = MAX_LIST if args.verbose else 8
+        selected = project_current(current_path, identity, routes)
+        current = selected["target"] if selected is not None and any(
+            list(route) == selected["scope"] and bind(task) == bind(selected) and task["id"] == selected["target"]
+            for _, route, task in tasks) else None
+        compact_emit({"runs": [card(row)[0] for row in tasks[:limit]], "upstream_queue": "unknown",
+                      **({"current": current} if current else {}),
+                      **({"more": len(tasks) - limit} if len(tasks) > limit else {})})
+        return
+
+    if args.command in {"current", "ack-take"}:
+        selected = project_current(current_path, identity, routes)
+        if selected is None:
+            if args.command == "current":
+                compact_emit({"status": "no_current", "upstream_queue": "unknown"})
+                return
+            raise MailboxError("no explicitly taken Run")
+        scope = tuple(selected["scope"])
+        task_row = next((row for row in tasks if row[1] == scope and bind(row[2]) == bind(selected)
+                         and row[2]["id"] == selected["target"]), None)
+        if task_row is None:
+            if args.command == "current":
+                compact_emit({"target": selected["target"], "status": "not_current",
+                              "upstream_queue": "unknown"})
+                return
+            raise MailboxError("taken Run is no longer current")
+        if args.command == "current":
+            view = card(task_row)[0]
+            if view["status"] == "ready" and selected["partial"]:
+                view["status"] = "partial"
+            compact_emit({**view, "upstream_queue": "unknown"})
+            return
+        if require_id(args.target) != selected["target"]:
+            raise MailboxError("acknowledgment must name the currently taken task target")
+        ids = list(dict.fromkeys(require_id(i) for i in args.event_ids))
+        if not set(ids) <= set(selected["ackable"]):
+            raise MailboxError("can only acknowledge fully delivered task/input IDs from take")
+        outbox = Outbox(scoped_dir(root_fd, "outbox", scope), scope)
+        try:
+            # Preflight the whole batch before writing any acknowledgments.
+            for event_id in ids:
+                try:
+                    event = load_event(outbox, event_id)
+                except FileNotFoundError:
+                    if prior_ack_issue(root_fd, scope, event_id) == selected["issue_id"]:
+                        continue
+                    raise
+                if bind(event) != bind(selected) or (event_id != selected["target"] and
+                        (event["kind"] != "comment" or event.get("run_input") not in ("trigger", "coalesced"))):
+                    raise MailboxError("acknowledgment does not match the taken Run")
+            for event_id in ids:
+                acknowledge_event(root_fd, outbox, event_id)
+        finally:
+            os.close(outbox.directory)
+        compact_emit({"status": "acknowledged_locally", "count": len(ids)})
+        return
+
+    selector = require_id(args.target)
+    matches = [row for row in rows if row[2]["kind"] == "task" and row[2]["id"] == selector]
+    task_row = unique_row(matches or [row for row in tasks
+                                       if selector in (row[2]["issue_id"], row[2].get("issue_key"))])
+    _, route, task = task_row
+    if task_row not in tasks:
+        raise MailboxError("task target is superseded; list assigned Runs")
+    view, manifest, comments, acked = card(task_row)
+    if view["status"] != "ready":
+        compact_emit({**view, "upstream_queue": "unknown"})
+        return
+    view.update(compact_body(task, MAX_READ_BODY if args.full else 1800))
+    # Bound total text returned. Do not include omitted or truncated content
+    # in the acknowledgment allowlist.
+    remaining = MAX_READ_BODY if args.full else 6000
+    ackable = [] if view.get("truncated") else [task["id"]]
+    primary = []
+    unacked = [i for i in manifest if i not in acked]
+    for event_id in unacked:
+        if len(primary) == (MAX_LIST if args.full else 8) or remaining <= 0:
+            break
+        item = comments[event_id]
+        body = compact_body(item, remaining if args.full else min(remaining, 700))
+        primary.append({"target": event_id, "input": item["run_input"], **body})
+        remaining -= len(body["text"])
+        if not body.get("truncated"):
+            ackable.append(event_id)
+    background = sorted(((when, event) for when, event in others.get((route, task["issue_id"]), ())
+                         if event["id"] not in acked and event.get("run_input") not in ("trigger", "coalesced")),
+                        key=lambda row: (row[0], row[1]["id"]), reverse=True)
+    view.update({"inputs": primary,
+                 "background": [{"target": event["id"], **compact_body(event, 300)}
+                                for _, event in background[:4]],
+                 "ackable": ackable, "upstream_queue": "unknown"})
+    if len(unacked) > len(primary):
+        view["more_inputs"] = len(unacked) - len(primary)
+        view["next_inputs"] = unacked[len(primary):len(primary) + 8]
+    if len(background) > 4:
+        view["more_background"] = len(background) - 4
+    partial = bool(view.get("truncated") or view.get("more_inputs")
+                   or any(item.get("truncated") for item in primary))
+    if partial:
+        view["status"] = "partial"
+    save_project_json(current_path, {"root": identity, "scope": list(route), "version": 1,
+                                     **dict(zip(BINDING, bind(task))), "target": task["id"],
+                                     "ackable": ackable, "partial": partial})
+    compact_emit(view)
+
+
+def compact_command(root_fd, routes, args, current_path, identity):
     cmd = args.command
     if cmd in {"reply", "complete", "result"}:
         target = require_id(args.target)
@@ -912,6 +1093,9 @@ def compact_command(root_fd, routes, args):
             os.close(outbox_fd)
 
     rows = list(project_events(root_fd, routes))
+    if cmd in {"runs", "take", "current", "ack-take"}:
+        assigned_command(root_fd, routes, args, rows, current_path, identity)
+        return
     if cmd == "tasks":
         latest = latest_tasks(rows, args.issue)
         limit = MAX_LIST if args.verbose else 8
@@ -974,6 +1158,14 @@ def parser():
     setup.add_argument("--route", action="append", default=[], metavar="CONNECTION:SLUG_OR_UUID")
     setup.add_argument("--install-dir", help="absolute Bridge Compose install directory; defaults to the parent of the mailbox root")
     commands.add_parser("tasks", help="summarize latest received task per Issue").add_argument("issue", nargs="?")
+    commands.add_parser("runs", help="list Runs received by this project and their input readiness").add_argument("issue", nargs="?")
+    commands.add_parser("current", help="show the exact Run explicitly taken in this project")
+    take = commands.add_parser("take", help="take one locally assigned Run with verified inputs")
+    take.add_argument("target")
+    take.add_argument("--full", action="store_true", help="include more Run input text")
+    ack_take = commands.add_parser("ack-take", help="acknowledge exact fully delivered IDs from take")
+    ack_take.add_argument("target")
+    ack_take.add_argument("event_ids", nargs="+")
     show = commands.add_parser("show", help="show a received Issue or event")
     show.add_argument("target")
     show.add_argument("--full", action="store_true", help="include longer task text and more comments")
@@ -1036,7 +1228,8 @@ def run(args):
     root_fd = os.open(root, DIR_FLAGS)
     try:
         if args.command in COMPACT_COMMANDS:
-            compact_command(root_fd, (explicit_scope,) if explicit_scope else routes or ((),), args)
+            compact_command(root_fd, (explicit_scope,) if explicit_scope else routes or ((),),
+                            args, config_path.with_name("mab-current.json"), os.path.realpath(root))
             return
         if args.command == "scopes":
             if scope:

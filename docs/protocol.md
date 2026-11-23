@@ -49,6 +49,11 @@ ACP prompt. An event is an observation, not permission to act.
   paused; `recovered` follows a complete read after interruption; `failed` means
   recovery stopped. `observed_at` and `last_synced_at` are UTC timestamps at the
   transition, not a live heartbeat. The Outbox doesn't grow on every poll.
+  A successful observation carries `input_ids` only when all authoritative
+  Multica claim inputs map to local events for that exact Run and epoch.
+  The array holds local Outbox event IDs in claim order; `[]` explicitly
+  means no assigned comments. A missing field, unavailable input event, or
+  newer degraded observation prevents pickup.
 
 An explicit local `ack EVENT_ID` allows the Bridge to remove a comment
 after it has recorded delivery in private state. The Bridge consumes the
@@ -57,6 +62,19 @@ Reading or listing does not acknowledge anything. Submit any requested direct
 reply before acknowledging its source comment. Active task snapshots, sync
 and action receipts still support routing, status and delivery recovery;
 they are not pruned by comment acknowledgment.
+
+### Local Run pickup
+
+The mailbox client lists known local Run deliveries without claiming or
+acknowledging any of them. The downstream agent explicitly takes a ready Run;
+this selects that exact Run locally and does not call Multica, start an agent,
+or change posting permissions. A selected Run never silently switches to its
+replacement. Pickup returns separately the authoritative inputs and unread
+Issue context; non-input comments are context, not proof of which Run they
+might be queued for. Batch acknowledgment only applies to entries actually
+delivered in the selected Run bundle, not background or a later Run. A
+known local delivery does not establish live remote presence. The remote
+queue is reported as unknown without an authoritative scoped view.
 
 ## Inbox
 

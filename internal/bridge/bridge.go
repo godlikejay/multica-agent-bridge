@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -190,6 +191,7 @@ poll:
 		if err = b.reconcile(&s, comments); err != nil {
 			return "", err
 		}
+		observedInputs := make(map[string]string, len(t.DeliveredCommentIDs))
 		for _, c := range comments {
 			if c.ID == "" || c.DeletedAt != "" || c.SourceTaskID == b.RunID {
 				continue
@@ -212,7 +214,10 @@ poll:
 				// input of this run. Keep a separate immutable delivery record.
 				k = mailbox.ID("run-input", b.RunID, role, source)
 			}
-			if s.Seen[k] != "" {
+			if id := s.Seen[k]; id != "" {
+				if role != "" {
+					observedInputs[c.ID] = id
+				}
 				continue
 			}
 			m := base
@@ -226,6 +231,9 @@ poll:
 				return "", err
 			}
 			s.Seen[k] = m.ID
+			if role != "" {
+				observedInputs[c.ID] = m.ID
+			}
 			if s.Seen[source] == "" {
 				s.Seen[source] = m.ID
 			}
@@ -236,16 +244,18 @@ poll:
 		if err = b.Box.PruneAcknowledgedComments(s.IssueID, s.Seen); err != nil {
 			return "", err
 		}
+		manifest := readyInputs(t.DeliveredCommentIDs, observedInputs)
 		now := time.Now().UTC()
 		lastSync, _ := time.Parse(time.RFC3339Nano, s.LastSyncedAt)
-		if s.Sync == nil || recovering || now.Sub(lastSync) >= 30*time.Second {
+		manifestChanged := s.Sync != nil && !reflect.DeepEqual(s.Sync.InputIDs, manifest)
+		if s.Sync == nil || recovering || manifestChanged || now.Sub(lastSync) >= 30*time.Second {
 			s.LastSyncedAt = now.Format(time.RFC3339Nano)
 			var syncErr error
 			switch {
 			case recovering:
-				syncErr = b.setSync(&s, base, "recovered")
-			case s.Sync == nil:
-				syncErr = b.setSync(&s, base, "healthy")
+				syncErr = b.publishSync(&s, base, "recovered", manifest)
+			case s.Sync == nil || manifestChanged:
+				syncErr = b.publishSync(&s, base, "healthy", manifest)
 			default:
 				syncErr = b.Box.Save(s)
 			}
@@ -433,8 +443,33 @@ func wait(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// Absence is different from a definite empty claim. A successful API read
+// alone does not prove that all of the inputs assigned by Multica were returned.
+func readyInputs(expected []string, observed map[string]string) *[]string {
+	if expected == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(expected))
+	seen := make(map[string]bool, len(expected))
+	for _, sourceID := range expected {
+		eventID := observed[sourceID]
+		if eventID == "" {
+			return nil
+		}
+		if !seen[eventID] {
+			ids = append(ids, eventID)
+			seen[eventID] = true
+		}
+	}
+	return &ids
+}
+
 func (b Bridge) setSync(s *mailbox.State, base mailbox.Message, status string) error {
-	if s.Sync != nil && s.Sync.Status == status {
+	return b.publishSync(s, base, status, nil)
+}
+
+func (b Bridge) publishSync(s *mailbox.State, base mailbox.Message, status string, inputIDs *[]string) error {
+	if s.Sync != nil && s.Sync.Status == status && reflect.DeepEqual(s.Sync.InputIDs, inputIDs) {
 		return nil
 	}
 	if s.SyncSequence == ^uint64(0) {
@@ -443,6 +478,7 @@ func (b Bridge) setSync(s *mailbox.State, base mailbox.Message, status string) e
 	s.SyncSequence++
 	base.Kind = "sync"
 	base.Status = status
+	base.InputIDs = inputIDs
 	base.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	base.LastSyncedAt = s.LastSyncedAt
 	base.Revision = strconv.FormatUint(s.SyncSequence, 10)

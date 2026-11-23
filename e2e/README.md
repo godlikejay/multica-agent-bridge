@@ -67,8 +67,9 @@ make e2e
 ```
 
 The command waits up to a minute for one marked local task, confirms the exact Issue/Run
-is running in the synthetic workspace, submits one ordinary reply, and
-verifies its remote comment belongs to that same Issue, Run and Agent.
+is running in the synthetic workspace, and checks that its successful initial
+sync records an explicitly empty comment input list. It submits one ordinary reply
+and verifies its remote comment belongs to that same Issue, Run and Agent.
 It also checks that the Bridge removes the confirmed reply request from Inbox.
 It then requests completion and waits for that exact **remote Run** to
 report `completed`. Only then does it print `REAL MULTICA E2E PASS`.
