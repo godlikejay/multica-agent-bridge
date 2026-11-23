@@ -126,7 +126,20 @@ Keep the local selection file `.local/mab-current.json` out of Git.
 operator explicitly approved the action. Both validate the exact event and
 Run binding. For a preview or manual approval, the separate `draft` and
 `submit` commands remain available; rebinding a draft requires terminal
-confirmation. The Bridge independently validates the binding before sending.
+confirmation. For an explicitly selected Run, `reply --current 'text'` or
+`complete --current 'text'` uses that exact selection instead of a separate
+lookup. It never picks a replacement. Use an exact input target instead
+when replying to a specific comment. Use `--wait 35` if the caller can wait
+and needs a receipt now. It waits locally after a single submission; a
+timeout returns the request ID for `result`. An interrupted wait does not
+cancel the action; keep the request ID and do not resend.
+
+For multiline text, use `reply TARGET --body-file PATH` or
+`complete --current --body-file PATH` instead of inline text. The file
+must be nonblank, NUL-free UTF-8 up to 32 KiB. The command preserves line
+breaks and does not require shell redirection.
+
+The Bridge independently validates the binding before sending.
 If delivery is uncertain, check the original Issue or wait for reconciliation;
 do not resend automatically. A completion receipt means the request was
 accepted locally, not that the Run ended in Multica. Completing a Run does

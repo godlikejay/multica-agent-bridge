@@ -1,7 +1,9 @@
 """Synthetic local mailbox and controlling-terminal tests. No Multica access."""
 
+import contextlib
 import errno
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 LINE_A = "10000000-0000-4000-8000-000000000001"
 LINE_B = "10000000-0000-4000-8000-000000000002"
@@ -580,6 +583,181 @@ print(json.dumps(rows[connection]))
                 cli.action_receipts(box, {**request, "epoch": 2})
         finally:
             os.close(fd)
+
+    def current_send_fixture(self):
+        _, a = self.scoped_fixture("cloud", LINE_A)
+        _, b = self.scoped_fixture("cloud", LINE_B)
+        for directory in (a, b):
+            task = json.loads((directory / "task-1.json").read_text())
+            sync = dict(task, id="ready", kind="sync", status="healthy", revision="1", input_ids=[])
+            (directory / "ready.json").write_text(json.dumps(sync))
+        helper = self.project_tool("current-send")
+        helper("setup", self.root, "--route", f"cloud:{LINE_A}", "--route", f"cloud:{LINE_B}")
+        return helper, a, b
+
+    def test_current_send_is_explicit_and_pins_one_scope(self):
+        helper, a, b = self.current_send_fixture()
+        self.assertIn("specify --current", helper("reply", "text", success=False))
+        self.assertIn("not both", helper("reply", "--current", "task-1", "text", success=False))
+        self.assertIn("no explicitly taken", helper("reply", "--current", "text", success=False))
+        self.assertIn("ambiguous", helper("take", "FIX-1", success=False))
+        self.assertFalse(list(self.inbox.rglob("*.json")))
+        self.assertEqual(helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")["status"], "ready")
+        self.assertIn("no explicitly taken",
+                      helper("--connection", "cloud", "--workspace", LINE_B,
+                             "reply", "--current", "wrong scope", success=False))
+        self.assertIn("ambiguous", helper("reply", "task-1", "not pinned", success=False))
+        pending = helper("reply", "--current", "--wait", 0, "普通回复")
+        self.assertEqual(pending["status"], "pending")
+        files = list(self.inbox.rglob("*.json"))
+        self.assertEqual(len(files), 1)
+        reply = json.loads(files[0].read_text())
+        self.assertEqual((reply["id"], reply["workspace_id"], reply["issue_id"], reply["run_id"],
+                          reply["epoch"], reply["kind"], reply["body"]),
+                         (pending["request"], LINE_A, "issue-1", "run-1", 1, "reply", "普通回复"))
+        self.assertIn("unreceipted", helper("reply", "--current", "--wait", 0, "don't resend", success=False))
+        task = json.loads((a / "task-1.json").read_text())
+        (a / "sent.json").write_text(json.dumps(dict(
+            task, id="sent", kind="receipt", request_id=reply["id"], status="reply_posted")))
+        done = helper("complete", "--wait", 0, "--current", "完成")
+        action = json.loads((files[0].parent / (done["request"] + ".json")).read_text())
+        self.assertEqual((action["workspace_id"], action["run_id"], action["kind"]), (LINE_A, "run-1", "complete"))
+        self.assertFalse((self.inbox / "cloud" / b.name).exists())
+
+    def test_body_file_preserves_multiline_text_for_exact_and_current_targets(self):
+        helper, a, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        path = self.root / "reply with spaces.txt"
+        payload = "  中文 \'single\' \"double\" $HOME `literal` \\\r\n第二行\n\n"
+        path.write_bytes(payload.encode("utf-8"))
+        target = ("--connection", "cloud", "--workspace", LINE_A)
+        reply = helper(*target, "reply", "task-1", "--body-file", path, "--wait", 0)
+        request = next(self.inbox.rglob(reply["request"] + ".json"))
+        self.assertEqual(json.loads(request.read_text())["body"], payload)
+        task = json.loads((a / "task-1.json").read_text())
+        (a / "sent.json").write_text(json.dumps(dict(
+            task, id="sent", kind="receipt", request_id=reply["request"], status="reply_posted")))
+
+        payload = "雪" * (cli.MAX_BODY // 3) + "ab"
+        path.write_bytes(payload.encode("utf-8"))
+        completion = helper("complete", "--current", "--body-file", path, "--wait", 0)
+        request = json.loads((request.parent / (completion["request"] + ".json")).read_text())
+        self.assertEqual((request["body"], request["kind"]), (payload, "complete"))
+
+    def test_body_file_validation_does_not_submit(self):
+        helper, _, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        for payload, error in [(b" \n", "nonblank"), (b"a\0b", "NUL-free"),
+                               (b"\xff", "UTF-8"), ("雪".encode() * (cli.MAX_BODY // 3 + 1), "size")]:
+            with self.subTest(error=error):
+                self.body.write_bytes(payload)
+                self.assertIn(error, helper("reply", "--current", "--body-file", self.body, success=False))
+        self.body.write_text("authorized file fixture")
+        self.assertIn("not both", helper("reply", "--current", "inline", "--body-file", self.body, success=False))
+        self.assertIn("not both", helper("--connection", "cloud", "--workspace", LINE_A,
+                                        "complete", "task-1", "inline", "--body-file", self.body, success=False))
+        self.assertIn("specify inline text", helper("complete", "--current", success=False))
+        link = self.root / "linked-body.txt"
+        link.symlink_to(self.body)
+        fifo = self.root / "body-fifo"
+        os.mkfifo(fifo)
+        for path in (link, fifo, self.root, self.root / "missing.txt"):
+            with self.subTest(path=path.name):
+                self.assertIn("mailbox:", helper("reply", "--current", "--body-file", path, success=False))
+        self.assertFalse(list(self.inbox.rglob("*.json")))
+
+    def test_current_send_rejects_changed_binding_ambiguous_stale_and_terminal(self):
+        helper, a, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        path = a / "task-1.json"
+        task = json.loads(path.read_text())
+        path.write_text(json.dumps(dict(task, run_id="changed")))
+        self.assertIn("no longer matches", helper("reply", "--current", "--wait", 0, "text", success=False))
+        path.write_text(json.dumps(task))
+        other = a / "other.json"
+        other.write_text(json.dumps(dict(task, id="other", run_id="ambiguous")))
+        self.assertIn("ambiguous", helper("reply", "--current", "--wait", 0, "text", success=False))
+        other.write_text(json.dumps(dict(task, id="other", run_id="new", epoch=2)))
+        self.assertIn("stale", helper("complete", "--current", "--wait", 0, "text", success=False))
+        other.unlink()
+        other.write_text(json.dumps(dict(task, id="other", kind="receipt", request_id="prior",
+                                             status="completion_requested")))
+        self.assertIn("completed run", helper("complete", "--current", "--wait", 0, "text", success=False))
+        self.assertFalse(list(self.inbox.rglob("*.json")))
+
+    def test_current_send_refuses_different_binding_reloaded_into_draft(self):
+        helper, a, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        path = a / "task-1.json"
+        task = json.loads(path.read_text())
+        original = cli.build_draft
+
+        def replace_before_build(*args):
+            path.write_text(json.dumps(dict(task, run_id="different", epoch=2)))
+            return original(*args)
+
+        args = cli.parser().parse_args(["--project", str(self.root / "current-send"),
+                                       "reply", "--current", "--wait", "0", "text"])
+        with patch.object(cli, "build_draft", side_effect=replace_before_build):
+            with self.assertRaisesRegex(cli.MailboxError, "no longer matches"):
+                cli.run(args)
+        self.assertFalse(list(self.inbox.rglob("*.json")))
+
+    def test_extended_wait_exposes_request_before_interruption(self):
+        helper, _, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        project = self.root / "current-send"
+        for value in ("-1", "61", "1.5"):
+            self.assertIn("integer from 0 to 60", helper("reply", "--current", "--wait", value, "text", success=False))
+        self.assertFalse(list(self.inbox.rglob("*.json")))
+        p = subprocess.Popen([sys.executable, "-B", str(SCRIPT), "--project", str(project),
+                              "reply", "--current", "--wait", "60", "text"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            readable, _, _ = select.select([p.stderr], [], [], 5)
+            self.assertTrue(readable, "request handle must be reported before the receipt wait completes")
+            handle = p.stderr.readline().decode()
+            files = list(self.inbox.rglob("*.json"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("check result " + files[0].stem, handle)
+            p.send_signal(signal.SIGINT)
+            stdout, _ = p.communicate(timeout=5)
+            self.assertEqual(p.returncode, 130)
+            self.assertEqual(stdout, b"")
+            self.assertEqual(helper("result", files[0].stem), {"status": "pending", "request": files[0].stem})
+            self.assertEqual(list(self.inbox.rglob("*.json")), files)
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.communicate(timeout=5)
+
+    def test_extended_wait_returns_bound_receipt_without_second_submit(self):
+        helper, a, _ = self.current_send_fixture()
+        helper("--connection", "cloud", "--workspace", LINE_A, "take", "FIX-1")
+        project = self.root / "current-send"
+        p = subprocess.Popen([sys.executable, "-B", str(SCRIPT), "--project", str(project),
+                              "complete", "--current", "--wait", "60", "summary"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            self.assertTrue(select.select([p.stderr], [], [], 5)[0], "request handle must appear")
+            p.stderr.readline()
+            files = list(self.inbox.rglob("*.json"))
+            self.assertEqual(len(files), 1)
+            request = json.loads(files[0].read_text())
+            eid = cli.hashlib.sha256(("\0".join(("receipt", request["issue_id"], request["id"]))).encode()).hexdigest()
+            event = dict(request, kind="receipt", id=eid, request_id=request["id"], status="completion_requested")
+            receipt = a / (eid + ".json")
+            temp = receipt.with_suffix(".tmp")
+            temp.write_text(json.dumps(event))
+            temp.replace(receipt)
+            stdout, stderr = p.communicate(timeout=5)
+            self.assertEqual(p.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout), {"status": "completion_requested"})
+            self.assertEqual(list(self.inbox.rglob("*.json")), files)
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.communicate(timeout=5)
 
     def test_take_requires_exact_ready_manifest_and_preserves_background(self):
         manifest = ["trigger-event", "coalesced-event"]

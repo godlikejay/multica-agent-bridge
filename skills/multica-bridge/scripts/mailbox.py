@@ -30,6 +30,8 @@ MAX_FILE = 256 * 1024
 MAX_BODY = 32 * 1024
 MAX_READ_BODY = 32 * 1024
 MAX_LIST = 100
+DEFAULT_SEND_WAIT = 2
+MAX_SEND_WAIT = 60
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z", re.ASCII)
 BINDING = ("issue_id", "run_id", "epoch")
 SCOPE_FIELDS = ("connection_id", "workspace_id")
@@ -180,9 +182,15 @@ def bounded_body(text):
     return text
 
 
+def read_body_file(path):
+    try:
+        return file_bytes(path, MAX_BODY).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MailboxError("body file must be UTF-8") from exc
+
+
 def draft(outbox, event_id, kind, body_file):
-    body = file_bytes(body_file, MAX_BODY).decode("utf-8")
-    return build_draft(outbox, event_id, kind, body)
+    return build_draft(outbox, event_id, kind, read_body_file(body_file))
 
 
 def build_draft(outbox, event_id, kind, body):
@@ -1192,18 +1200,27 @@ def assigned_command(root_fd, routes, args, rows, current_path, identity):
     compact_emit(view)
 
 
-def compact_command(root_fd, routes, args, current_path, identity):
-    cmd = args.command
-    if cmd in {"reply", "complete", "result"}:
-        target = require_id(args.target)
-    if cmd == "result":
-        rows = [(scope, event) for _, scope, event in project_events(root_fd, routes)
-                if event["kind"] == "receipt" and event.get("request_id") == target and isinstance(event.get("status"), str)]
-        if len({(scope, bind(event)) for scope, event in rows}) > 1:
-            raise MailboxError("request ID is ambiguous across runs")
-        compact_emit(compact_result([e for _, e in rows], target, args.verbose))
-        return
-    if cmd in {"reply", "complete"}:
+def send_target(root_fd, routes, args, current_path, identity):
+    target, body = args.target, args.text
+    # Without an event target, the single positional argument is the body.
+    if args.current and args.body_file is None and body is None:
+        target, body = None, target
+    if args.body_file is not None and (body is not None or (args.current and target is not None)):
+        raise MailboxError("specify either inline text or --body-file, not both")
+    if args.current:
+        if target is not None:
+            raise MailboxError("specify either --current or an exact event target, not both")
+        if body is None and args.body_file is None:
+            raise MailboxError("specify inline text or --body-file")
+        selected = project_current(current_path, identity, routes)
+        if selected is None:
+            raise MailboxError("no explicitly taken Run for this mailbox scope")
+        scope = tuple(selected["scope"])
+        target = selected["target"]
+    else:
+        if target is None or (args.body_file is None and body is None):
+            raise MailboxError("specify --current or an exact event target, plus a body")
+        target = require_id(target)
         candidates = []
         for route in routes:
             directory = scoped_dir(root_fd, "outbox", route, optional=True)
@@ -1218,21 +1235,52 @@ def compact_command(root_fd, routes, args, current_path, identity):
             if event["kind"] in UNREAD_KINDS:
                 candidates.append((0, route, event))
         _, scope, _ = unique_row(candidates)
-        if not scope:
-            raise MailboxError("configure a project route before sending")
-        outbox_fd = scoped_dir(root_fd, "outbox", scope)
-        outbox = Outbox(outbox_fd, scope)
-        try:
-            request = submit_item(root_fd, outbox, build_draft(outbox, target, cmd, args.text), yes=True)
-            deadline = time.monotonic() + 2.0
-            while True:
-                receipts = action_receipts(outbox, request)
-                if receipts or time.monotonic() >= deadline:
-                    compact_emit(compact_result(receipts, request["id"], args.verbose))
-                    return
-                time.sleep(0.2)
-        finally:
-            os.close(outbox_fd)
+        selected = None
+    if not scope:
+        raise MailboxError("configure a project route before sending")
+    outbox = Outbox(scoped_dir(root_fd, "outbox", scope), scope)
+    try:
+        if selected is not None:
+            try:
+                task = load_event(outbox, target)
+            except FileNotFoundError as exc:
+                raise MailboxError("taken Run is no longer current") from exc
+            if task["kind"] != "task" or bind(task) != bind(selected):
+                raise MailboxError("taken Run target no longer matches its binding")
+        if args.body_file is not None:
+            body = read_body_file(args.body_file)
+        item = build_draft(outbox, target, args.command, body)
+        if selected is not None and bind(item["request"]) != bind(selected):
+            raise MailboxError("taken Run target no longer matches its binding")
+        # submit_item repeats the exact binding, freshness and terminal
+        # validation under the Inbox lock before publishing once.
+        request = submit_item(root_fd, outbox, item, yes=True)
+        if args.wait > DEFAULT_SEND_WAIT:
+            print(f"Submitted; if interrupted, check result {request['id']}.", file=sys.stderr, flush=True)
+        deadline = time.monotonic() + args.wait
+        while True:
+            receipts = action_receipts(outbox, request)
+            remaining = deadline - time.monotonic()
+            if receipts or remaining <= 0:
+                compact_emit(compact_result(receipts, request["id"], args.verbose))
+                return
+            time.sleep(min(0.2, remaining))
+    finally:
+        os.close(outbox.directory)
+
+
+def compact_command(root_fd, routes, args, current_path, identity):
+    cmd = args.command
+    if cmd == "result":
+        target = require_id(args.target)
+        rows = [(scope, event) for _, scope, event in project_events(root_fd, routes)
+                if event["kind"] == "receipt" and event.get("request_id") == target and isinstance(event.get("status"), str)]
+        if len({(scope, bind(event)) for scope, event in rows}) > 1:
+            raise MailboxError("request ID is ambiguous across runs")
+        compact_emit(compact_result([e for _, e in rows], target, args.verbose))
+        return
+    if cmd in {"reply", "complete"}:
+        return send_target(root_fd, routes, args, current_path, identity)
 
     rows = list(project_events(root_fd, routes))
     if cmd == "comments":
@@ -1300,6 +1348,16 @@ def compact_command(root_fd, routes, args, current_path, identity):
     compact_emit(detail)
 
 
+def send_wait(value):
+    try:
+        seconds = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"wait must be an integer from 0 to {MAX_SEND_WAIT}") from exc
+    if not 0 <= seconds <= MAX_SEND_WAIT:
+        raise argparse.ArgumentTypeError(f"wait must be an integer from 0 to {MAX_SEND_WAIT}")
+    return seconds
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", help="absolute mailbox root; overrides project setup (BRIDGE_ROOT is a fallback)")
@@ -1332,9 +1390,13 @@ def parser():
     comments.add_argument("--all", action="store_true", help="include acknowledged comments still available locally")
     commands.add_parser("result", help="check a submitted request").add_argument("target")
     for kind in ("reply", "complete"):
-        action = commands.add_parser(kind, help=f"{kind} a run by exact event target")
-        action.add_argument("target")
-        action.add_argument("text")
+        action = commands.add_parser(kind, help=f"{kind} an exact event target or the currently taken Run")
+        action.add_argument("target", nargs="?", help="exact event target; omit with --current")
+        action.add_argument("text", nargs="?", help="inline body; omit with --body-file")
+        action.add_argument("--body-file", type=Path, metavar="PATH", help="read the UTF-8 body from a regular file")
+        action.add_argument("--current", action="store_true", help="use the exact Run explicitly taken in this project")
+        action.add_argument("--wait", type=send_wait, default=DEFAULT_SEND_WAIT, metavar="SECONDS",
+                            help=f"wait 0–{MAX_SEND_WAIT} seconds for a local receipt (default: {DEFAULT_SEND_WAIT})")
     commands.add_parser("scopes", help="list available multi-connection outboxes")
     listing = commands.add_parser("list")
     listing.add_argument("--limit", type=int, default=20)

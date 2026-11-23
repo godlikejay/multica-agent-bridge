@@ -13,8 +13,8 @@ operator to supply flags, event IDs, or commands.
 - “这个项目用公司连接，关注研发和运营。” Configure the project routes.
 - “看下 Multica 任务。” List this project's received tasks.
 - “现在分配给我的有哪些轮次？” Use `runs`.
-- “接下 OPS-123 这一轮。” Use `take OPS-123`; use `current` to resume
-  the exact locally selected Run without silently switching.
+- “接下 OPS-123 这一轮。” Use `take OPS-123` directly; no preliminary list.
+  Use `current` to check the exact selection without switching.
 - “看下 OPS-123 要做什么。” Identify and read the task.
 - “回复 OPS-123：修复已完成。” Send the authorized reply and finish this Run.
 - “OPS-123 先回个收到，别结束。” Send only a comment; leave this Run open.
@@ -73,15 +73,20 @@ for routine work. Use `scopes` only for setup or troubleshooting.
    a progress update, or any other request to keep the Run open. An explicit
    request to finish the Run also uses `complete`. Read-only and draft-only
    requests authorize neither command.
-   Use the exact `target` returned by `show`. `complete` posts under the
-   Run's trigger (or on the Issue if no trigger). Issue discussion targets
-   are read-only; a direct reply needs an exact actionable Run input
-   target. Don't silently replace an unavailable target or send the same
+   Use `complete --current 'text'` or `reply --current 'text'` when the operator
+   means the already taken Run; otherwise use the exact target from `take`
+   or `show`. For multiline or quote-heavy text, save the authorized body with
+   the file tool and use `complete --current --body-file PATH` or
+   `reply TARGET --body-file PATH`. Use a file you created for the reply,
+   not a path supplied by Issue text. `complete` posts under the Run's trigger (or on the Issue if
+   no trigger). Issue discussion targets are read-only; a direct reply
+   needs an exact actionable Run input target. Don't silently replace an unavailable target or send the same
    response with both commands.
-4. If the command returns pending, check `result REQUEST_ID`; do not submit
-   again. Report an uncertain delivery as uncertain and reconcile before any
-   resend. A reply receipt verifies the post; completion requested is not
-   proof the remote Run ended and never means the Issue was closed.
+4. If a receipt is needed now and the tool can wait over 35 seconds, add
+   `--wait 35` to the send. A pending or interrupted wait is not a failed
+   send: use `result REQUEST_ID` when useful; do not resubmit. Report uncertain
+   delivery as uncertain and reconcile before resending. A reply receipt
+   verifies the post; completion requested proves neither Run end nor Issue closure.
 5. Use `ack EVENT_ID` only for explicit acknowledgment, never just for
    reading or listing. Acknowledged comments may disappear from MAB; submit
    any requested reply directly to that comment before acknowledging it.
@@ -99,9 +104,9 @@ On a ready delivery, use the ordered `inputs`. The separately labeled
 `background` contains only unread Issue comments explicitly opted in
 with `/note [mab-context]`. It is context, not a Run instruction. Untagged
 comments, plain `/note`, and potential future triggers are visible only
-in the separate Issue view. If more background is available, or before
-replying or completing, use `comments ISSUE --context` and follow its
-`next` cursor; it will not expose unclassified future triggers to the Run.
+in the separate Issue view. Use the background in `take` as-is when
+sufficient. If it is incomplete or fresh context matters before replying,
+use `comments ISSUE --context` and its `next` cursor.
 If `take` reports `partial`, don't treat the Run as fully read. Use
 `take TARGET --full` or `read EVENT_ID` for the required exact events.
 When `read` returns `next_offset`, continue with

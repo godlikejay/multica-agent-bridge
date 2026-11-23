@@ -72,3 +72,15 @@ python3 "$tool" result REQUEST_ID
 `reply` 和 `complete` 会直接提交，只有明确授权才使用。两者都会校验对应事件和 Run；要先拟稿或在终端核对，仍可用 `draft`、`submit`。旧草稿改绑必须手动确认。发送状态不明时查原 Issue 或等待核对，不要直接重发。收到完成请求的回执不代表远端已结束；结束 Run 也不会关闭 Issue。
 
 只给 Agent 必要的邮箱读取权限，需要它提交已授权动作时才给 Inbox 写权限。不要给它 daemon 登录目录、令牌或 Bridge 私有状态。若要强制人工提交，就让 Agent 不能写 Inbox，由另一个身份提交；Skill 本身不是权限隔离。
+
+### 减少调用
+
+已经明确接下某轮时，可以直接用 `reply --current '正文'` 或
+`complete --current '正文'`，不需要先查 ID。它只认当前选中的那一轮，
+不会自动换到下一轮。回复指定评论仍使用确切的评论目标。
+发送时可加 `--wait 35` 限时等本地回执，只提交一次。等不到或中断后，
+用原请求号查回执，不重发，也不要把有回执当成远端 Run 已结束。
+
+多行正文可以先保存为文本文件，再用 `reply TARGET --body-file PATH` 或
+`complete --current --body-file PATH`。文件须为非空白、不含 NUL 的 UTF-8
+文本，上限 32 KiB。无需重定向，原样保留换行，不能与行内正文同时使用。
