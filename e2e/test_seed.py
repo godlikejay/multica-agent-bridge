@@ -226,5 +226,24 @@ class SeedFixture(unittest.TestCase):
                             for h in seed.OPENER.handlers))
 
 
+    def test_attachment_upload_is_multipart_and_returns_stable_path(self):
+        attachment_id = '00000000-0000-0000-0000-000000000092'
+        raw = json.dumps({'id': attachment_id, 'workspace_id': WS,
+                          'filename': seed.ATTACHMENT_NAME, 'size_bytes': len(seed.ATTACHMENT_BYTES),
+                          'download_url': 'https://not-followed.example.invalid/signed'}).encode()
+        with patch.object(seed.OPENER, 'open', return_value=io.BytesIO(raw)) as opener:
+            out = seed.upload_attachment(seed.ATTACHMENT_NAME, seed.ATTACHMENT_BYTES,
+                                         token=SYNTHETIC_PAT, workspace=WS, issue_id=ISSUE)
+        req = opener.call_args.args[0]
+        self.assertEqual(req.full_url, seed.API + '/api/upload-file')
+        self.assertEqual(req.method, 'POST')
+        self.assertIn('multipart/form-data; boundary=', req.get_header('Content-type'))
+        self.assertIn(b'name="file"', req.data)
+        self.assertIn(seed.ATTACHMENT_BYTES, req.data)
+        self.assertIn(b'name="issue_id"', req.data)
+        self.assertIn(ISSUE.encode(), req.data)
+        self.assertEqual(out, (attachment_id, '/api/attachments/' + attachment_id + '/download'))
+
+
 if __name__ == '__main__':
     unittest.main()

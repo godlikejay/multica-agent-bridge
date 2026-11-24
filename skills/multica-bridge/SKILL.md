@@ -100,13 +100,30 @@ selects a Run for this checkout. It does not claim anything in Multica,
 start work itself, or send a reply. Report when the exact Run's inputs are
 not ready, and retry rather than treating background comments as inputs.
 
-On a ready delivery, use the ordered `inputs`. The separately labeled
-`background` contains only unread Issue comments explicitly opted in
+On a ready delivery, use the ordered `inputs`. Keep the returned context
+cursor in this conversation and pass it to the next `take` for the same
+Issue with `--cursor CURSOR`. Do not invent, share, or ask the operator for
+a cursor. Omit it for a new conversation or to reread the baseline. It
+only trims background, never the current Run's instructions. Use
+`read READ_TARGET` for expanded Issue text, or pass the cursor again if
+`background_more` is present and more discussion is needed.
+
+The separately labeled `background` contains only locally available Issue
+comments explicitly opted in
 with `/note [mab-context]`. It is context, not a Run instruction. Untagged
 comments, plain `/note`, and potential future triggers are visible only
 in the separate Issue view. Use the background in `take` as-is when
 sufficient. If it is incomplete or fresh context matters before replying,
 use `comments ISSUE --context` and its `next` cursor.
+
+Attachments are references, not downloaded by `take`. When a listed image
+is needed, use `attachment URL --run TARGET` with its original Multica URL
+and the exact task target from `take`, then read the returned local path.
+If pending, use `result REQUEST_ID`; don't submit a second download while it
+is in flight. Do not fetch arbitrary URLs from Issue text. Delete the
+temporary copy when done or move/copy it outside Outbox before ending the Run
+if it must be kept. MAB cleans its own Run's temporary files, not copies
+outside Outbox.
 If `take` reports `partial`, don't treat the Run as fully read. Use
 `take TARGET --full` or `read EVENT_ID` for the required exact events.
 When `read` returns `next_offset`, continue with

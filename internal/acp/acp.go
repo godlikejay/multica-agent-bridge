@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // Version is the development version advertised in the ACP handshake.
@@ -133,6 +134,21 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, handle Handler) err
 	sessions := map[string]string{}
 	initialized := false
 	var current *active
+	// EOF and process shutdown cancel but used to return while the active
+	// worker still owned temporary local output. Give cancellable cleanup a
+	// bounded chance before main exits the process.
+	defer func() {
+		if current == nil {
+			return
+		}
+		current.cancel()
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-completed:
+		case <-timer.C:
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()

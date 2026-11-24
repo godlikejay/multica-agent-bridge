@@ -36,7 +36,11 @@ Bridge 上线后，[给 Codex、agy 或 OMP 安装 MAB Skill](docs/zh-CN/agent-i
 - 「看下这个项目有哪些 Multica 任务。」
 - 「读一下 OPS-123，回复说已收到，再说说你的初步看法。」
 - 「OPS-123 有新留言吗？要不要调整方案？」
+- 「接 OPS-123 的下一轮，需要时看一下附带的截图。」
 - 「OPS-123 做完了，发个总结，结束这轮。」
+
+同一会话连续接同一个 Issue 的 Run 时，Skill 可沿用上下文游标，避免重复读背景。
+附件按需下载；需要在 Run 结束后保留的文件，请移出临时 Outbox。
 
 这里看到的是 MAB **已收到**的任务，不包括 Multica 里尚未交付的排队任务。结束一轮执行不会关闭 Issue。手动配置或操作见[详细指南](docs/zh-CN/agent-integration.md)。
 

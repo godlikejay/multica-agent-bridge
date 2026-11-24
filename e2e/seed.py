@@ -7,8 +7,11 @@ from pathlib import Path
 import time
 import urllib.error
 import urllib.request
+import uuid
 
-from fixture import (API, MARKER, OPENER, ROOT, UUID, WORKSPACE, expect_run_inputs,
+from fixture import (API, ATTACHMENT_BYTES, ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES,
+                     COMMENT_ATTACHMENT_NAME, FOREIGN_ATTACHMENT_BYTES,
+                     FOREIGN_ATTACHMENT_NAME, MARKER, OPENER, ROOT, UUID, WORKSPACE, expect_run_inputs,
                      receipt, require, smoke, submit, synthetic_workspace, token_for_file)
 
 # These are the disposable fixture values in compose.yaml, not user settings.
@@ -45,6 +48,36 @@ def request(method, path, body=None, *, token=None, workspace=None):
         return json.loads(raw) if raw else None
     except (ValueError, UnicodeError):
         raise SystemExit('E2E FAIL: invalid JSON during seed ' + path) from None
+
+
+def upload_attachment(filename, data, *, token, workspace, issue_id=None):
+    boundary = 'mab_fixture_' + uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+             'Content-Type: text/plain\r\n\r\n'.encode('ascii') + data + b'\r\n']
+    if issue_id is not None:
+        require(isinstance(issue_id, str) and UUID.fullmatch(issue_id), 'invalid fixture attachment Issue')
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="issue_id"\r\n\r\n'
+                     f'{issue_id}\r\n'.encode('ascii'))
+    parts.append(f'--{boundary}--\r\n'.encode('ascii'))
+    req = urllib.request.Request(API + '/api/upload-file', method='POST', data=b''.join(parts), headers={
+        'Authorization': 'Bearer ' + token, 'X-Workspace-ID': workspace, 'Accept': 'application/json',
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        'X-Client-Capabilities': 'stable_attachment_urls',
+    })
+    try:
+        with OPENER.open(req, timeout=5) as response:
+            raw = response.read(LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        exc.close()
+        raise SystemExit(f'E2E FAIL: synthetic attachment upload: HTTP {code}; response hidden.') from None
+    require(len(raw) <= LIMIT, 'oversized synthetic attachment upload response')
+    row = json.loads(raw)
+    aid = uuid_field(row, 'id')
+    require(row.get('workspace_id') == workspace and row.get('filename') == filename
+            and row.get('size_bytes') == len(data), 'synthetic upload metadata mismatch')
+    # Request only the stable canonical download path, never a signed URL.
+    return aid, '/api/attachments/' + aid + '/download'
 
 
 def uuid_field(row, key):
@@ -112,7 +145,7 @@ def wait_for_runtime(token, workspace):
         time.sleep(1)
 
 
-def dispatch(token):
+def dispatch(token, with_attachments=False):
     try:
         workspace = synthetic_workspace(token)
     except urllib.error.HTTPError as exc:
@@ -130,13 +163,18 @@ def dispatch(token):
     require(agent.get('workspace_id') == workspace and agent.get('runtime_id') == runt,
             'seed Agent workspace or runtime mismatch')
 
-    issue = request('POST', '/api/issues', {
+    issue_payload = {
         'title': MARKER + ': bridge protocol smoke',
         'description': MARKER + ': disposable protocol fixture with no real work.',
         'status': 'todo',
         'assignee_type': 'agent',
         'assignee_id': agent_id,
-    }, **scope)
+    }
+    if with_attachments:
+        attachment_id, url = upload_attachment(ATTACHMENT_NAME, ATTACHMENT_BYTES, **scope)
+        issue_payload['attachment_ids'] = [attachment_id]
+        issue_payload['description'] += '\n\n[' + ATTACHMENT_NAME + '](' + url + ')'
+    issue = request('POST', '/api/issues', issue_payload, **scope)
     issue_id = uuid_field(issue, 'id')
     require(issue.get('workspace_id') == workspace and issue.get('assignee_type') == 'agent'
             and issue.get('assignee_id') == agent_id, 'seed Issue workspace or assignee mismatch')
@@ -309,7 +347,7 @@ def stop_and_restart(owner, agent, issue, active, parent):
         time.sleep(1)
 
 
-def invocation_protocol(owner_token):
+def invocation_protocol(owner_token, with_attachments=False):
     workspace = synthetic_workspace(owner_token)
     owner = {'token': owner_token, 'workspace': workspace}
     owner_id = uuid_field(request('GET', '/api/me', token=owner_token), 'id')
@@ -329,9 +367,21 @@ def invocation_protocol(owner_token):
                and a.get('owner_id') == owner_id and a.get('permission_mode') == 'private']
     require(len(matches) == 1, 'permission test needs the owner’s private fixture Agent')
     agent_id = uuid_field(matches[0], 'id')
+    other_attachment_url = comment_attachment = None
+    if with_attachments:
+        other = request('POST', '/api/issues', {'title': 'Disposable foreign attachment fixture',
+                                               'status': 'todo'}, **owner)
+        other_id = uuid_field(other, 'id')
+        require(other.get('workspace_id') == workspace and not other.get('assignee_id'),
+                'foreign attachment fixture must be an unassigned local Issue')
+        _, other_attachment_url = upload_attachment(FOREIGN_ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES,
+                     COMMENT_ATTACHMENT_NAME, FOREIGN_ATTACHMENT_BYTES,
+                                                    issue_id=other_id, **owner)
+        comment_attachment = upload_attachment(COMMENT_ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES, **owner)
     smoke(owner_token, follow_up=lambda task, parent: implicit_follow_up(
         owner, owner_id, member, member_id, agent_id, task, parent,
-        after_claim=lambda issue, run, parent_id: stop_and_restart(owner, agent_id, issue, run, parent_id)))
+        after_claim=lambda issue, run, parent_id: stop_and_restart(owner, agent_id, issue, run, parent_id)),
+          foreign_attachment_url=other_attachment_url, comment_attachment=comment_attachment)
     # Separate and unassigned: no automatic run/source and no existing mention thread.
     issue = request('POST', '/api/issues', {'title': 'Disposable invocation permission fixture',
                                            'status': 'todo'}, **owner)
@@ -394,12 +444,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('auth', 'dispatch', 'invocation'))
     parser.add_argument('--token-file', type=Path, default=ROOT / 'pat')
+    parser.add_argument('--with-attachments', action='store_true')
     args = parser.parse_args()
     try:
         if args.command == 'auth':
             auth(args.token_file)
         else:
-            (dispatch if args.command == 'dispatch' else invocation_protocol)(token_for_file(args.token_file))
+            (dispatch if args.command == 'dispatch' else invocation_protocol)(
+                token_for_file(args.token_file), with_attachments=args.with_attachments)
     except (ValueError, OSError):
         raise SystemExit('E2E FAIL: private PAT file or local stack unavailable.') from None
 

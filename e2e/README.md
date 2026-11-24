@@ -11,8 +11,14 @@ From a fresh checkout on a Docker host with Compose v2, Python 3, and ports
 13000 and 18080 free, run `make e2e-auto`. It starts a disposable stack,
 uses the pinned local development login to mint a one-day PAT for a synthetic
 account, starts the daemon, creates and assigns one test Issue, and runs the
-same protocol smoke below. The automated command also admits a second
-synthetic member through the normal invitation API. While the first Run is
+same protocol smoke below. It also uses the local upload API to attach
+invented text files to that Issue and to a human comment. The active daemon's
+Bridge must discover both files and return their exact bytes using its scoped
+task token, refuse a file belonging to another synthetic Issue, and remove
+the Run catalog and downloaded files at completion. The fixture's owner PAT
+only creates uploads/Issues/comments and checks Run state; it does not read
+private attachment bytes on behalf of the worker. The automated command also
+admits a second synthetic member through the normal invitation API. While the first Run is
 active, both people post the same plain reply under the Bridge's real agent
 comment. The member's reply is saved without queueing a Run. The owner's reply
 leaves the original Run running and becomes the exact input of the next Run

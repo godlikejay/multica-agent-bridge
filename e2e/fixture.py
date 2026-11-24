@@ -27,6 +27,12 @@ ESCAPED_MARKER = MARKER.replace('_', r'\_')
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}')
 UUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 BINDING = ('issue_id', 'run_id', 'epoch')
+ATTACHMENT_NAME = 'bridge-synthetic-private.txt'
+ATTACHMENT_BYTES = b'Multica Bridge disposable Issue attachment fixture.\n'
+COMMENT_ATTACHMENT_NAME = 'bridge-synthetic-comment.txt'
+COMMENT_ATTACHMENT_BYTES = b'Multica Bridge disposable comment attachment fixture.\n'
+FOREIGN_ATTACHMENT_NAME = 'bridge-synthetic-foreign.txt'
+FOREIGN_ATTACHMENT_BYTES = b'This disposable file belongs to another Issue.\n'
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -167,10 +173,14 @@ def task_event(wait=0):
     return e
 
 
-def submit(e, kind, body):
+def submit(e, kind, body=None, attachment_url=None):
     request_id = 'e2e-' + uuid.uuid4().hex
     action = {k: e[k] for k in BINDING}
-    action.update(version=1, kind=kind, id=request_id, body=body)
+    action.update(version=1, kind=kind, id=request_id)
+    if body is not None:
+        action['body'] = body
+    if attachment_url is not None:
+        action['attachment_url'] = attachment_url
     inbox = MAIL / 'inbox' / e['issue_id']
     require(not inbox.parent.is_symlink(), 'symlink Inbox refused')
     inbox.mkdir(mode=0o700, exist_ok=True)
@@ -244,9 +254,11 @@ def expect_run_inputs(issue, run, sources):
         time.sleep(1)
 
 
-def post_note(issue_path, token, workspace, body):
-    result = api_request(issue_path + '/comments', token, workspace,
-                         payload={'content': body, 'type': 'comment'})
+def post_note(issue_path, token, workspace, body, attachment_id=None):
+    payload = {'content': body, 'type': 'comment'}
+    if attachment_id is not None:
+        payload['attachment_ids'] = [attachment_id]
+    result = api_request(issue_path + '/comments', token, workspace, payload=payload)
     source_id = result.get('id') if isinstance(result, dict) else None
     require(isinstance(source_id, str) and UUID.fullmatch(source_id),
             'test note did not return a valid source ID')
@@ -286,7 +298,82 @@ def expect_inbox_cleaned(issue_id, request_id):
     raise SystemExit('E2E FAIL: confirmed reply still present in Inbox: ' + request_id)
 
 
-def smoke(token, follow_up=None):
+def expect_attachment(binding, foreign_url, source_id=None):
+    # The Go worker is the only component making attachment reads; the test
+    # neither handles its real mat token nor downloads these bytes via PAT.
+    base = Path('outbox', 'attachments', binding['issue_id'], binding['run_id'], str(binding['epoch']))
+    catalog_path = MAIL / base / 'catalog.json'
+    deadline = time.monotonic() + 45
+    entries, comments = [], []
+    while time.monotonic() < deadline:
+        try:
+            fd = os.open(catalog_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            time.sleep(0.5)
+            continue
+        with os.fdopen(fd, 'rb') as f:
+            require(stat.S_ISREG(os.fstat(f.fileno()).st_mode), 'catalog must be a regular file')
+            raw = f.read(256 * 1024 + 1)
+        require(len(raw) <= 256 * 1024, 'attachment catalog too large')
+        catalog = json.loads(raw)
+        require(catalog.get('version') == 1 and all(catalog.get(k) == binding[k] for k in BINDING),
+                'catalog does not match exact authorized Issue and Run')
+        if catalog.get('status') == 'ready':
+            entries = catalog.get('issue', [])
+            if source_id is None:
+                break
+            origins = catalog.get('comments', {})
+            require(isinstance(origins, dict), 'invalid comment attachment catalog')
+            comments = origins.get(source_id, [])
+            if comments:
+                break
+        time.sleep(0.5)
+    require(isinstance(entries, list) and all(isinstance(x, dict) for x in entries)
+            and isinstance(comments, list) and all(isinstance(x, dict) for x in comments),
+            'invalid ready attachment lists')
+    require(not any(x.get('url') == foreign_url for x in entries + comments),
+            'other Issue attachment leaked into authorized Run metadata')
+    denied = submit(binding, 'attachment_fetch', attachment_url=foreign_url)
+    rejection = receipt(denied, 'attachment_unavailable', binding)
+    require(not rejection.get('attachment_path'), 'other Issue unexpectedly produced an artifact')
+    artifacts = [catalog_path]
+    fixture = [(entries, ATTACHMENT_NAME, ATTACHMENT_BYTES)]
+    if source_id is not None:
+        fixture.append((comments, COMMENT_ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES))
+    for group, name, data in fixture:
+        candidates = [x for x in group if x.get('filename') == name]
+        require(len(candidates) == 1, 'private fixture attachment missing from exact Run catalog: ' + name)
+        meta = candidates[0]
+        url = meta.get('url')
+        require(isinstance(url, str) and url and meta.get('size_bytes') == len(data),
+                'private fixture attachment metadata does not match the upload')
+        request_id = submit(binding, 'attachment_fetch', attachment_url=url)
+        ready = receipt(request_id, 'attachment_ready', binding)
+        expected = base / request_id
+        require(ready.get('attachment_path') == expected.as_posix(),
+                'attachment receipt did not publish a safe Run-owned path')
+        file = MAIL / expected
+        with os.fdopen(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as f:
+            info = os.fstat(f.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_size == len(data),
+                    'expected exact size-bounded regular attachment artifact')
+            require(f.read(len(data) + 1) == data, 'private attachment bytes differ from synthetic original')
+        artifacts.append(file)
+    print('Private Issue and selected comment attachments verified via active Bridge Run; other Issue refused:',
+          binding['run_id'])
+    return artifacts
+
+
+def expect_attachment_cleaned(paths):
+    for _ in range(20):
+        if not any(os.path.lexists(path) for path in paths):
+            print('Terminal Run attachment catalog and file cleanup verified.')
+            return
+        time.sleep(0.5)
+    raise SystemExit('E2E FAIL: terminal Run attachment artifact was not cleaned.')
+
+
+def smoke(token, follow_up=None, foreign_attachment_url=None, comment_attachment=None):
     workspace = synthetic_workspace(token)
     e = task_event(wait=60)
     issue, run = e['issue_id'], e['run_id']
@@ -304,7 +391,13 @@ def smoke(token, follow_up=None):
     notes = []
     for prefix, discussion in (('/note [mab-context] ', 'ordinary'), ('/note ', None)):
         note = prefix + MARKER + ': ' + uuid.uuid4().hex
-        notes.append((post_note(path, token, workspace, note), note, discussion))
+        if discussion == 'ordinary' and comment_attachment is not None:
+            cid, url = comment_attachment
+            note += '\n\n[' + COMMENT_ATTACHMENT_NAME + '](' + url + ')'
+            note_id = post_note(path, token, workspace, note, attachment_id=cid)
+        else:
+            note_id = post_note(path, token, workspace, note)
+        notes.append((note_id, note, discussion))
     # Let the worker pick up both notes in its next poll.
     for note_id, note, discussion in notes:
         expect_issue_note(issue, note_id, note, discussion)
@@ -312,6 +405,8 @@ def smoke(token, follow_up=None):
     require({r.get('id') for r in current_runs} == {r.get('id') for r in runs},
             'synthetic human note unexpectedly created a Run')
     print('Issue context verified for marked and unmarked human notes without creating a Run:', issue)
+    artifact = (expect_attachment(e, foreign_attachment_url, notes[0][0] if comment_attachment else None)
+                if foreign_attachment_url else None)
 
     body = MARKER + ': ordinary smoke reply ' + uuid.uuid4().hex
     request_id = submit(e, 'reply', body)
@@ -330,6 +425,8 @@ def smoke(token, follow_up=None):
     for _ in range(60):
         status = get('/api/daemon/tasks/' + run + '/status', token).get('status')
         if status == 'completed':
+            if artifact is not None:
+                expect_attachment_cleaned(artifact)
             print('REAL MULTICA E2E PASS: exact Run completed:', run)
             if after_complete:
                 after_complete()

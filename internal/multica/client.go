@@ -81,11 +81,12 @@ func (e *Error) Error() string {
 func fail(code string) error { return &Error{Code: code} }
 
 type Client struct {
-	cfg   Config
-	base  *url.URL
-	http  *http.Client
-	mu    sync.RWMutex
-	scope *Task
+	cfg         Config
+	base        *url.URL
+	http        *http.Client
+	storageHTTP *http.Client
+	mu          sync.RWMutex
+	scope       *Task
 }
 
 func FromEnv() (Config, error) {
@@ -145,7 +146,14 @@ func New(c Config) (*Client, error) {
 		tr.Proxy = nil
 	}
 	tr.MaxResponseHeaderBytes = 64 << 10
-	return &Client{cfg: c, base: u, http: &http.Client{Transport: tr, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	storage := http.DefaultTransport.(*http.Transport).Clone()
+	storage.Proxy = nil
+	storage.DialContext = dialPublicStorage
+	storage.MaxResponseHeaderBytes = 64 << 10
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{cfg: c, base: u,
+		http:        &http.Client{Transport: tr, Timeout: 20 * time.Second, CheckRedirect: noRedirect},
+		storageHTTP: &http.Client{Transport: storage, Timeout: 20 * time.Second, CheckRedirect: noRedirect}}, nil
 }
 
 func (c *Client) request(ctx context.Context, method, path string, q url.Values, payload any, out any) (http.Header, int, error) {

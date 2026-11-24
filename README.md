@@ -62,7 +62,12 @@ Then talk to the agent normally, without repeating the path or workspaces:
 - “Check this project’s Multica tasks.”
 - “Read OPS-123, reply that we’ve received it, and share your initial take.”
 - “Any new comments on OPS-123? Should we change the plan?”
+- “Take the next run for OPS-123 and look at the attached screenshot if needed.”
 - “OPS-123 is finished. Post a short summary and end this run.”
+
+The Skill can pass a context cursor between takes in the same conversation
+to avoid rereading Issue background. Attachments download only on request;
+keep anything you need after the Run outside the temporary Outbox.
 
 The agent sees what MAB has received, not Multica’s full queue. Ending
 a Run does not close the Issue. See the [agent guide](docs/agent-integration.md)

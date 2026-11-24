@@ -74,6 +74,22 @@ GET comments does not expose the UI's no-trigger selection. Only an explicit
 context. Plain notes and unclassified comments remain in Issue view only.
 Never infer future Run affiliation by timestamp or missing links.
 
+`take` can return a bounded, opaque context cursor to pass back with
+`--cursor` on the same Issue. The caller owns it; it is not a server offset,
+an acknowledgment, or a credential. A missing, invalid, or mismatched
+cursor starts from the compact baseline. It only suppresses already
+delivered, unchanged background. Authoritative Run inputs are not suppressed.
+For an assignment with no comment input the Issue body is the instruction,
+not optional background. An older background revision changing may reset
+the compact page so the caller cannot silently miss the edit.
+
+Native attachment metadata includes the original Multica URL and display
+name. Automatic context includes Issue-owned attachments and attachments
+for comments otherwise eligible for that delivery, not later Run inputs.
+No attachment bytes are fetched during pickup. The Bridge refreshes this
+metadata separately from immutable task and comment events. A missing
+catalog does not block text pickup or mean the Issue has no attachments.
+
 Acknowledge the exact Issue body and exact Run reference separately. The
 Bridge removes a read body only once no outstanding Run reference needs it;
 a future claim may rehydrate the same body without making it unread again.
@@ -101,6 +117,19 @@ must be allowed by the bound run; if omitted a triggering comment is used when
 applicable. `complete` posts the final summary and asks ACP to finish normally;
 it does not modify Issue status. Neither action interprets body text as code.
 Use a nonblank body of at most 32 KiB.
+
+`attachment_fetch` carries `attachment_url` instead of a body or parent.
+It uses the active Run's credential to retrieve a native attachment
+belonging to that Run's Issue. The caller URL is a reference, not a
+network destination; arbitrary Markdown links, other Issues and stale
+Run bindings are rejected. A successful receipt has status
+`attachment_ready` and a mailbox-root-relative `attachment_path`.
+Files are temporary, scoped to the Run, and not a shared download cache.
+The consumer can remove them or copy/move them out of Outbox before
+completion. Terminal Run cleanup only removes that Run's managed files
+in Outbox. A hard process kill can defer cleanup until the next verified
+worker start for that Issue. Consumers sharing a mailbox filesystem must
+trust each other; use separate mounts for untrusted operators.
 
 For a confirmed reply or final comment, the Bridge persists its delivery
 result and publishes a receipt before removing the exact matching Inbox file.

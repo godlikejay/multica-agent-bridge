@@ -35,8 +35,8 @@ case "${1:-help}" in
     sh ./run.sh up
     python3 -B seed.py auth
     sh ./run.sh bootstrap --token-file .local/pat
-    python3 -B seed.py dispatch
-    python3 -B seed.py invocation
+    python3 -B seed.py dispatch --with-attachments
+    python3 -B seed.py invocation --with-attachments
     ;;
   up)
     need_docker

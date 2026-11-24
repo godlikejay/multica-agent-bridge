@@ -51,6 +51,7 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer release()
+
 	scope, err := b.Remote.Task(ctx)
 	if err != nil {
 		return "", err
@@ -68,6 +69,8 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	_, attachmentSupported := b.Remote.(attachmentRemote)
+	previousRun, previousEpoch := s.RunID, s.Epoch
 	if s.RunID != b.RunID {
 		if s.RetiredRuns[b.RunID] {
 			return "", errors.New("run binding was already superseded")
@@ -90,6 +93,22 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		if err = b.Box.Save(s); err != nil {
 			return "", err
 		}
+	}
+	if attachmentSupported {
+		if previousRun != "" && previousRun != s.RunID {
+			if err := b.Box.CleanAttachments(s.IssueID, previousRun, previousEpoch); err != nil {
+				log.Print("bridge: retired Run attachment cleanup deferred")
+			}
+		}
+		if err := b.Box.CleanAttachments(s.IssueID, s.RunID, s.Epoch); err != nil {
+			log.Print("bridge: attachment startup cleanup deferred")
+		}
+		activeRun, activeEpoch := s.RunID, s.Epoch
+		defer func() {
+			if err := b.Box.CleanAttachments(t.IssueID, activeRun, activeEpoch); err != nil {
+				log.Print("bridge: attachment cleanup deferred")
+			}
+		}()
 	}
 	// A crash may have happened after a remote post but before its response was saved.
 	// Treat that gap as uncertain rather than retrying automatically.
@@ -144,6 +163,9 @@ func (b Bridge) Run(ctx context.Context) (string, error) {
 		return "", err
 	}
 	failures := 0
+	var lastAttachments *mailbox.AttachmentCatalog
+	var lastAttachmentPoll time.Time
+	var lastAttachmentComments map[string]string
 	retry := func(readErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -193,6 +215,7 @@ poll:
 			return "", err
 		}
 		observedInputs := make(map[string]string, len(t.DeliveredCommentIDs))
+		attachmentComments := make(map[string]string)
 		for _, c := range comments {
 			if c.ID == "" || c.DeletedAt != "" || c.SourceTaskID == b.RunID {
 				continue
@@ -207,7 +230,11 @@ poll:
 			if own {
 				continue
 			}
-			id, e := b.emitComment(&s, base, c, t.RunInputRole(c.ID))
+			role := t.RunInputRole(c.ID)
+			if role != "" || backgroundNote(c.Body) {
+				attachmentComments[c.ID] = c.Revision
+			}
+			id, e := b.emitComment(&s, base, c, role)
 			if e != nil {
 				return "", e
 			}
@@ -217,6 +244,22 @@ poll:
 		}
 		if err = b.Box.CleanComments(&s, t.CancelledRunIDs); err != nil {
 			return "", err
+		}
+		if remote, ok := b.Remote.(attachmentRemote); ok && (time.Since(lastAttachmentPoll) >= 45*time.Second || !reflect.DeepEqual(lastAttachmentComments, attachmentComments)) {
+			lastAttachmentPoll = time.Now()
+			lastAttachmentComments = attachmentComments
+			catalog := scopedAttachmentCatalog(ctx, remote, base, attachmentComments)
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if !reflect.DeepEqual(lastAttachments, &catalog) {
+				if e := b.Box.PublishAttachmentCatalog(catalog); e != nil {
+					// A broken attachment feature must not block text pickup/replies.
+					log.Print("bridge: attachment catalog unavailable")
+				} else {
+					lastAttachments = &catalog
+				}
+			}
 		}
 		manifest := readyInputs(t.DeliveredCommentIDs, observedInputs)
 		now := time.Now().UTC()
@@ -311,6 +354,25 @@ func (b Bridge) apply(ctx context.Context, t multica.Task, s *mailbox.State, in 
 	}
 	if m.RunID != s.RunID || m.Epoch != s.Epoch {
 		return finish("stale")
+	}
+	if m.Kind == "attachment_fetch" {
+		remote, ok := b.Remote.(attachmentRemote)
+		if !ok {
+			return finish("attachment_unavailable")
+		}
+		rel, err := b.storeAttachment(ctx, remote, t, m)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if err != nil {
+			var remoteErr *multica.Error
+			if errors.As(err, &remoteErr) && (remoteErr.Code == "task_not_running" || remoteErr.Code == "task_not_found") {
+				return finish("stale")
+			}
+			return finish("attachment_unavailable")
+		}
+		receipt.AttachmentPath = rel
+		return finish("attachment_ready")
 	}
 	if !utf8.ValidString(m.Body) || strings.ContainsRune(m.Body, 0) {
 		return finish("invalid_body")
@@ -543,6 +605,14 @@ func (b Bridge) cleanupDelivered(s *mailbox.State, in mailbox.Input) error {
 	receipt := &a.Receipt
 	if a.Reconciliation != nil {
 		receipt = a.Reconciliation
+	}
+	switch receipt.Status {
+	case "attachment_ready", "attachment_unavailable":
+		return b.Box.RemoveDelivered(s.IssueID, m.ID, in.Digest)
+	case "stale":
+		if m.Kind == "attachment_fetch" {
+			return b.Box.RemoveDelivered(s.IssueID, m.ID, in.Digest)
+		}
 	}
 	if receipt.RemoteID == "" {
 		return nil

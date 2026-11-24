@@ -32,27 +32,29 @@ type Scope struct {
 
 type Message struct {
 	Scope
-	Version      int       `json:"version"`
-	Kind         string    `json:"kind"`
-	ID           string    `json:"id"`
-	IssueID      string    `json:"issue_id"`
-	RunID        string    `json:"run_id"`
-	Epoch        uint64    `json:"epoch"`
-	Body         string    `json:"body,omitempty"`
-	IssueKey     string    `json:"issue_key,omitempty"`
-	SourceID     string    `json:"source_id,omitempty"`
-	Revision     string    `json:"revision,omitempty"`
-	RunInput     string    `json:"run_input,omitempty"`
-	ParentID     string    `json:"parent_id,omitempty"`
-	RequestID    string    `json:"request_id,omitempty"`
-	Status       string    `json:"status,omitempty"`
-	RemoteID     string    `json:"remote_id,omitempty"`
-	ObservedAt   string    `json:"observed_at,omitempty"`
-	LastSyncedAt string    `json:"last_synced_at,omitempty"`
-	InputIDs     *[]string `json:"input_ids,omitempty"`
-	BodyRef      string    `json:"body_ref,omitempty"`
-	Discussion   string    `json:"discussion,omitempty"`
-	CreatedAt    string    `json:"created_at,omitempty"`
+	Version        int       `json:"version"`
+	Kind           string    `json:"kind"`
+	ID             string    `json:"id"`
+	IssueID        string    `json:"issue_id"`
+	RunID          string    `json:"run_id"`
+	Epoch          uint64    `json:"epoch"`
+	Body           string    `json:"body,omitempty"`
+	IssueKey       string    `json:"issue_key,omitempty"`
+	SourceID       string    `json:"source_id,omitempty"`
+	Revision       string    `json:"revision,omitempty"`
+	RunInput       string    `json:"run_input,omitempty"`
+	ParentID       string    `json:"parent_id,omitempty"`
+	RequestID      string    `json:"request_id,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	RemoteID       string    `json:"remote_id,omitempty"`
+	ObservedAt     string    `json:"observed_at,omitempty"`
+	LastSyncedAt   string    `json:"last_synced_at,omitempty"`
+	InputIDs       *[]string `json:"input_ids,omitempty"`
+	BodyRef        string    `json:"body_ref,omitempty"`
+	Discussion     string    `json:"discussion,omitempty"`
+	CreatedAt      string    `json:"created_at,omitempty"`
+	AttachmentURL  string    `json:"attachment_url,omitempty"`
+	AttachmentPath string    `json:"attachment_path,omitempty"`
 }
 type State struct {
 	Scope
@@ -321,13 +323,22 @@ func (b Box) Inputs(issueID string) ([]Input, error) {
 		if d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
 			continue
 		}
-		if m.Scope != b.scope() || m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID != issueID || m.Epoch == 0 || len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" {
+		if m.Scope != b.scope() || m.ID+".json" != name || m.Version != 1 || m.RunID == "" || m.IssueID != issueID || m.Epoch == 0 || !validID.MatchString(m.RunID) {
 			continue
 		}
-		if m.Kind != "reply" && m.Kind != "complete" {
+		switch m.Kind {
+		case "reply", "complete":
+			if len(m.Body) > MaxBody || strings.TrimSpace(m.Body) == "" || m.AttachmentURL != "" {
+				continue
+			}
+		case "attachment_fetch":
+			if m.Body != "" || m.ParentID != "" || len(m.AttachmentURL) > 4096 || strings.TrimSpace(m.AttachmentURL) == "" {
+				continue
+			}
+		default:
 			continue
 		}
-		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" || m.InputIDs != nil || m.BodyRef != "" || m.Discussion != "" || m.CreatedAt != "" {
+		if m.Status != "" || m.RequestID != "" || m.RemoteID != "" || m.SourceID != "" || m.Revision != "" || m.RunInput != "" || m.IssueKey != "" || m.ObservedAt != "" || m.LastSyncedAt != "" || m.InputIDs != nil || m.BodyRef != "" || m.Discussion != "" || m.CreatedAt != "" || m.AttachmentPath != "" {
 			continue
 		}
 		results = append(results, Input{m, ID(string(raw))})

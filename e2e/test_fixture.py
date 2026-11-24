@@ -209,5 +209,36 @@ class SmokeFixture(unittest.TestCase):
             self.run_smoke(final='failed')
 
 
+    def test_attachment_receipts_and_cleanup_use_exact_run_path(self):
+        catalog_path = (self.mail / 'outbox' / 'attachments' / self.event['issue_id'] /
+                        self.event['run_id'] / '1' / 'catalog.json')
+        catalog_path.parent.mkdir(parents=True)
+        foreign = '/api/attachments/' + uid(11) + '/download'
+        issue_url = '/api/attachments/' + uid(12) + '/download'
+        comment_url = '/api/attachments/' + uid(13) + '/download'
+        source = uid(14)
+        catalog = dict(self.event, status='ready',
+                       issue=[dict(url=issue_url, filename=f.ATTACHMENT_NAME, size_bytes=len(f.ATTACHMENT_BYTES))],
+                       comments={source: [dict(url=comment_url, filename=f.COMMENT_ATTACHMENT_NAME,
+                                               size_bytes=len(f.COMMENT_ATTACHMENT_BYTES))]})
+        catalog_path.write_text(json.dumps(catalog))
+        def receive(rid, state, binding):
+            if state == 'attachment_unavailable':
+                return {'status': state}
+            file = catalog_path.with_name(rid)
+            file.write_bytes(f.ATTACHMENT_BYTES if rid == 'allowed' else f.COMMENT_ATTACHMENT_BYTES)
+            return {'status': state, 'attachment_path': file.relative_to(self.mail).as_posix()}
+        with (patch.object(f, 'submit', side_effect=['denied', 'allowed', 'comment']) as submit,
+              patch.object(f, 'receipt', side_effect=receive), contextlib.redirect_stdout(io.StringIO())):
+            result = f.expect_attachment(self.event, foreign, source)
+        self.assertEqual([c.kwargs['attachment_url'] for c in submit.call_args_list], [foreign, issue_url, comment_url])
+        self.assertTrue(all(c.args[0] == self.event and c.args[1] == 'attachment_fetch' for c in submit.call_args_list))
+        self.assertEqual([x.name for x in result], ['catalog.json', 'allowed', 'comment'])
+        for x in result:
+            x.unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            f.expect_attachment_cleaned(result)
+
+
 if __name__ == '__main__':
     unittest.main()

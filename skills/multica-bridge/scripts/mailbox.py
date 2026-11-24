@@ -41,7 +41,7 @@ KINDS = {"reply", "complete"}
 TERMINAL = {"completion_requested"}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-COMPACT_COMMANDS = {"tasks", "show", "comments", "runs", "take", "current", "ack-take", "reply", "complete", "result"}
+COMPACT_COMMANDS = {"tasks", "show", "comments", "runs", "take", "current", "ack-take", "reply", "complete", "result", "attachment"}
 
 
 class MailboxError(Exception):
@@ -163,8 +163,8 @@ def with_input_body(event, lookup):
 
 def metadata(e):
     keys = ("id", "kind", *BINDING, *SCOPE_FIELDS, "issue_key", "source_id", "revision", "run_input",
-            "discussion", "created_at", "body_ref", "request_id", "status", "remote_id", "observed_at", "last_synced_at")
-    return {k: (e[k][:256] if isinstance(e[k], str) else e[k])
+            "discussion", "created_at", "body_ref", "request_id", "status", "remote_id", "observed_at", "last_synced_at", "attachment_path")
+    return {k: (e[k][:2048 if k == "attachment_path" else 256] if isinstance(e[k], str) else e[k])
             for k in keys if k in e and type(e[k]) in (str, int)}
 
 
@@ -1050,6 +1050,192 @@ def discussion_command(root_fd, args, rows):
     compact_emit(result)
 
 
+def attachment_directory(root_fd, scope, task):
+    parts = ["outbox", *scope, "attachments", require_id(task["issue_id"]),
+             require_id(task["run_id"]), str(task["epoch"])]
+    directory = os.dup(root_fd)
+    try:
+        for part in parts:
+            child = os.open(part, DIR_FLAGS, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return directory
+    except BaseException:
+        os.close(directory)
+        raise
+
+
+def attachment_catalog(root_fd, scope, task):
+    try:
+        directory = attachment_directory(root_fd, scope, task)
+        try:
+            catalog = json_file("catalog.json", directory)
+        finally:
+            os.close(directory)
+    except (FileNotFoundError, PermissionError):
+        # Optional metadata may not yet be published/readable; this must not
+        # suppress otherwise complete Run instructions. Invalid JSON/binding
+        # and symlink errors still fail closed at the filesystem boundary.
+        return None
+    if not valid_binding(catalog) or bind(catalog) != bind(task) or not matches_scope(catalog, scope):
+        raise MailboxError("attachment catalog does not match selected Run")
+    return catalog if catalog.get("status") == "ready" else None
+
+
+def attachment_links(items):
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise MailboxError("invalid attachment inventory")
+    links = []
+    # The catalog file is already size-bounded. Do not silently mark omitted
+    # attachment metadata as delivered by slicing to MAX_LIST.
+    for a in items:
+        if (not isinstance(a, dict) or not isinstance(a.get("url"), str)
+                or not a["url"] or len(a["url"].encode("utf-8")) > 4096
+                or not isinstance(a.get("filename", "attachment"), str)):
+            raise MailboxError("invalid attachment metadata")
+        links.append({"url": a["url"], "name": a.get("filename", "attachment")})
+    return links
+
+
+def attachment_result(root_fd, identity, scope, receipt):
+    if receipt.get("status") != "attachment_ready":
+        return {"status": receipt.get("status", "pending")}
+    parts = ["outbox", *scope, "attachments", require_id(receipt["issue_id"]),
+             require_id(receipt["run_id"]), str(receipt["epoch"]), require_id(receipt["request_id"])]
+    expected = "/".join(parts)
+    actual = receipt.get("attachment_path")
+    if actual not in {expected, *(expected + "." + ext for ext in ("png", "jpg", "gif", "webp", "pdf"))}:
+        raise MailboxError("attachment receipt path does not match selected request")
+    parts[-1] = actual.rsplit("/", 1)[-1]
+    directory = attachment_directory(root_fd, scope, receipt)
+    try:
+        fd = os.open(parts[-1], FILE_FLAGS, dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise MailboxError("attachment is not a regular local file")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
+    return {"status": "attachment_ready", "path": str(Path(identity).joinpath(*parts))}
+
+
+def fetch_attachment(root_fd, routes, args, current_path, identity):
+    if getattr(args, "run", None):
+        target = require_id(args.run)
+        rows = [row for row in project_events(root_fd, routes)
+                if row[2]["kind"] == "task" and row[2]["id"] == target]
+        _, route, task = unique_row(rows)
+        selected = {**task, "target": target, "scope": list(route)}
+    else:
+        selected = project_current(current_path, identity, routes)
+    if selected is None:
+        raise MailboxError("take an active Run before requesting an attachment")
+    url = args.url
+    if (not isinstance(url, str) or len(url.encode("utf-8")) > 4096 or not url.startswith(("http://", "https://", "/api/attachments/"))
+            or any(ord(c) < 32 for c in url)):
+        raise MailboxError("expected the original native attachment URL")
+    scope = tuple(selected["scope"])
+    outbox = Outbox(scoped_dir(root_fd, "outbox", scope), scope)
+    inbox = None
+    try:
+        task = load_event(outbox, selected["target"])
+        if task["kind"] != "task" or bind(task) != bind(selected):
+            raise MailboxError("selected Run binding changed; take again")
+        status, _ = run_inputs([(w, e) for w, e in events(outbox) if bind(e) == bind(task)])
+        if status != "ready":
+            raise MailboxError("selected Run is not active and ready")
+        request = {"version": 1, "id": uuid.uuid4().hex, "kind": "attachment_fetch",
+                   **dict(zip(BINDING, bind(task))), **scope_fields(scope), "attachment_url": url}
+        inbox = scoped_dir(root_fd, "inbox", scope, create=bool(scope))
+        shelf = issue_inbox(inbox, request["issue_id"], create=True)
+        try:
+            fcntl.flock(shelf, fcntl.LOCK_EX)
+            verify_scope_directory(root_fd, "outbox", scope, outbox.directory)
+            verify_scope_directory(root_fd, "inbox", scope, inbox)
+            validate(outbox, shelf, request)
+            publish(shelf, request)
+        finally:
+            os.close(shelf)
+        deadline = time.monotonic() + args.wait
+        while True:
+            receipts = action_receipts(outbox, request)
+            if receipts:
+                compact_emit({**attachment_result(root_fd, identity, scope, receipts[0]), "request": request["id"]})
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                compact_emit({"status": "pending", "request": request["id"]})
+                return
+            time.sleep(min(.2, remaining))
+    finally:
+        os.close(outbox.directory)
+        if inbox is not None:
+            os.close(inbox)
+
+
+def context_hash(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()[:24]
+
+
+def take_context(token, identity, scope, task, background, full=False, catalog=None):
+    binding = [1, context_hash(identity), list(scope), task["issue_id"]]
+    state = None
+    try:
+        if not isinstance(token, str) or len(token) > 2048 or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise ValueError()
+        v = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if (not isinstance(v, list) or len(v) != 9 or v[:4] != binding
+                or type(v[5]) is not int or v[5] < 0 or not isinstance(v[6], str)
+                or type(v[7]) is not int or v[7] < 0
+                or not all(isinstance(v[i], str) and re.fullmatch(r"[0-9a-f]{24}", v[i]) for i in (4, 8))):
+            raise ValueError()
+        state = v
+    except (ValueError, UnicodeError, RecursionError):
+        pass
+    attachment_comments = (catalog or {}).get("comments", {})
+    if not isinstance(attachment_comments, dict):
+        attachment_comments = {}
+    def prefix(when, eid):
+        return context_hash([(w, e, attachment_comments.get(e.get("source_id")))
+                             for w, e in background if (w, e["id"]) <= (when, eid)])
+    # A backdated insertion, edit, deletion or changed revision behind the
+    # watermark restarts context rather than silently hiding the change.
+    if state is not None and prefix(state[5], state[6]) != state[8]:
+        state = None
+    reset = state is None
+    issue_hash = context_hash([task.get("body", ""), task.get("issue_key", ""), (catalog or {}).get("issue")])
+    changed = reset or state[4] != issue_hash
+    when, eid, offset = (0, "", 0) if reset else tuple(state[5:8])
+    page = []
+    for w, e in background:
+        key = (w, e["id"])
+        if key < (when, eid) or (key == (when, eid) and not offset):
+            continue
+        if len(page) >= (20 if full else 4):
+            break
+        start = offset if key == (when, eid) else 0
+        raw = e.get("body", "").encode("utf-8")
+        if start > len(raw) or (start < len(raw) and raw[start] & 0xC0 == 0x80):
+            # Invalid tokens never permit skipping arbitrary bytes.
+            return take_context(None, identity, scope, task, background, full, catalog)
+        text = raw[start:start + (MAX_READ_BODY if full else 1200)].decode("utf-8", errors="ignore")
+        end = start + len(text.encode("utf-8"))
+        more = end < len(raw)
+        page.append({"target": e["id"], "text": text,
+                     **({"offset": start} if start else {}),
+                     **({"truncated": True} if more else {})})
+        when, eid, offset = w, e["id"], end if more else 0
+        if more:
+            break
+    fields = [*binding, issue_hash, when, eid, offset, prefix(when, eid)]
+    cursor = base64.urlsafe_b64encode(json.dumps(fields, separators=(",", ":")).encode()).decode().rstrip("=")
+    return page, cursor, changed, reset
+
+
 def assigned_command(root_fd, routes, args, rows, current_path, identity):
     tasks = latest_tasks(rows)
     exact = {}
@@ -1079,7 +1265,7 @@ def assigned_command(root_fd, routes, args, rows, current_path, identity):
                         comments[event_id] = with_input_body(event, lambda ref: bodies.get((route, ref)))
                     except MailboxError:
                         pass
-                if event_id not in comments and event_id not in acked:
+                if event_id not in comments:
                     status = "input_unavailable"
         result = {"issue": task.get("issue_key") or task["issue_id"], "target": task["id"],
                   "title": compact_body(task, 120)["text"].split("\n", 1)[0], "status": status}
@@ -1159,41 +1345,46 @@ def assigned_command(root_fd, routes, args, rows, current_path, identity):
     if view["status"] != "ready":
         compact_emit({**view, "upstream_queue": "unknown"})
         return
-    view.update(compact_body(task, MAX_READ_BODY if args.full else 1800))
-    # Bound total text returned. Do not include omitted or truncated content
-    # in the acknowledgment allowlist.
-    remaining = MAX_READ_BODY if args.full else 6000
-    ackable = [] if view.get("truncated") else [task["id"]]
-    primary = []
-    unacked = [i for i in manifest if i not in acked]
-    for event_id in unacked:
-        if len(primary) == (MAX_LIST if args.full else 8) or remaining <= 0:
-            break
-        item = comments[event_id]
-        body = compact_body(item, remaining if args.full else min(remaining, 700))
-        primary.append({"target": event_id, "input": item["run_input"], **body})
-        remaining -= len(body["text"])
-        if not body.get("truncated"):
-            ackable.append(event_id)
-    input_keys = {issue_comment_key(comments[i]) for i in manifest if i in comments}
+    # Run instructions are never hidden by the optional Issue-context cursor
+    # or by local acknowledgments. Fail rather than silently omit instructions.
+    if sum(len(comments[i].get("body", "").encode("utf-8")) for i in manifest) > MAX_FILE:
+        raise MailboxError("Run instructions exceed delivery budget; inspect exact input events before acting")
+    primary = [{"target": i, "input": comments[i]["run_input"],
+                **compact_body(comments[i], MAX_FILE)} for i in manifest]
+    ackable = [task["id"], *manifest]
+    input_keys = {issue_comment_key(comments[i]) for i in manifest}
     background = sorted(((when, event) for when, event in canonical_comments(
         others.get((route, task["issue_id"]), ()))
-        if event["id"] not in acked and event.get("discussion") == "ordinary"
-        and issue_comment_key(event) not in input_keys),
-        key=lambda row: comment_order(*row), reverse=True)
-    view.update({"inputs": primary,
-                 "background": [{"target": event["id"], **compact_body(event, 300)}
-                                for _, event in background[:4]],
-                 "ackable": ackable, "upstream_queue": "unknown"})
-    if len(unacked) > len(primary):
-        view["more_inputs"] = len(unacked) - len(primary)
-        view["next_inputs"] = unacked[len(primary):len(primary) + 8]
-    if len(background) > 4:
-        view["more_background"] = len(background) - 4
-    partial = bool(view.get("truncated") or view.get("more_inputs")
-                   or any(item.get("truncated") for item in primary))
-    if partial:
-        view["status"] = "partial"
+        if event.get("discussion") == "ordinary" and issue_comment_key(event) not in input_keys),
+        key=lambda row: (row[0], row[1]["id"]))
+    catalog = attachment_catalog(root_fd, route, task)
+    page, cursor, issue_changed, reset = take_context(
+        getattr(args, "cursor", None), identity, route, task, background, args.full, catalog)
+    view.update({"inputs": primary, "background": page, "cursor": cursor,
+                 "context": "reset" if reset else "delta", "ackable": ackable,
+                 "upstream_queue": "unknown"})
+    if page and (page[-1].get("truncated") or page[-1]["target"] != background[-1][1]["id"]):
+        view["background_more"] = True
+    if issue_changed or args.full or not manifest:
+        task_body = compact_body(task, MAX_FILE if args.full or not manifest else 1800)
+        view.update(task_body)
+        view["text_role"] = "run_instructions" if not manifest else "issue_background"
+        if task_body.get("truncated"):
+            view["read_target"] = task["id"]
+            ackable.remove(task["id"])
+    if catalog is not None:
+        if issue_changed or args.full:
+            links = attachment_links(catalog.get("issue"))
+            if links:
+                view["attachments"] = links
+        by_source = catalog.get("comments", {})
+        if isinstance(by_source, dict):
+            for item in [*primary, *page]:
+                original = bodies.get((route, item["target"]))
+                links = attachment_links(by_source.get(original.get("source_id"))) if original else []
+                if links:
+                    item["attachments"] = links
+    partial = False
     save_project_json(current_path, {"root": identity, "scope": list(route), "version": 1,
                                      **dict(zip(BINDING, bind(task))), "target": task["id"],
                                      "ackable": ackable, "partial": partial})
@@ -1271,13 +1462,19 @@ def send_target(root_fd, routes, args, current_path, identity):
 
 def compact_command(root_fd, routes, args, current_path, identity):
     cmd = args.command
+    if cmd == "attachment":
+        return fetch_attachment(root_fd, routes, args, current_path, identity)
     if cmd == "result":
         target = require_id(args.target)
         rows = [(scope, event) for _, scope, event in project_events(root_fd, routes)
                 if event["kind"] == "receipt" and event.get("request_id") == target and isinstance(event.get("status"), str)]
         if len({(scope, bind(event)) for scope, event in rows}) > 1:
             raise MailboxError("request ID is ambiguous across runs")
-        compact_emit(compact_result([e for _, e in rows], target, args.verbose))
+        if rows and rows[0][1].get("status") == "attachment_ready":
+            scope, receipt = rows[0]
+            compact_emit({**attachment_result(root_fd, identity, scope, receipt), "request": target})
+        else:
+            compact_emit(compact_result([e for _, e in rows], target, args.verbose))
         return
     if cmd in {"reply", "complete"}:
         return send_target(root_fd, routes, args, current_path, identity)
@@ -1375,6 +1572,7 @@ def parser():
     commands.add_parser("current", help="show the exact Run explicitly taken in this project")
     take = commands.add_parser("take", help="take one locally assigned Run with verified inputs")
     take.add_argument("target")
+    take.add_argument("--cursor", help="opaque context cursor from the previous take in this agent session")
     take.add_argument("--full", action="store_true", help="include more Run input text")
     ack_take = commands.add_parser("ack-take", help="acknowledge exact fully delivered IDs from take")
     ack_take.add_argument("target")
@@ -1388,6 +1586,10 @@ def parser():
     comments.add_argument("--limit", type=int, default=8)
     comments.add_argument("--context", action="store_true", help="show only comments explicitly opted into Run context")
     comments.add_argument("--all", action="store_true", help="include acknowledged comments still available locally")
+    attachment = commands.add_parser("attachment", help="request a native attachment for the currently taken active Run")
+    attachment.add_argument("url")
+    attachment.add_argument("--run", help="exact task target returned by take; avoids shared-current selection races")
+    attachment.add_argument("--wait", type=send_wait, default=DEFAULT_SEND_WAIT, metavar="SECONDS")
     commands.add_parser("result", help="check a submitted request").add_argument("target")
     for kind in ("reply", "complete"):
         action = commands.add_parser(kind, help=f"{kind} an exact event target or the currently taken Run")
