@@ -9,14 +9,15 @@ mailbox tool; the agent and your terminal need local access to the mailbox.
 
 ## Install one copy
 
-From the project where the agent works, download the Skill and its helper.
+From the project where the agent works, download the Skill, its on-demand reference, and helper.
 Use the same source revision as your image if you pinned the image by commit:
 
 ```sh
 skill=.agents/skills/multica-bridge
 src=https://raw.githubusercontent.com/godlikejay/multica-agent-bridge/main/skills/multica-bridge
-mkdir -p "$skill/scripts"
+mkdir -p "$skill/scripts" "$skill/references"
 curl -fsSLo "$skill/SKILL.md" "$src/SKILL.md"
+curl -fsSLo "$skill/references/operations.md" "$src/references/operations.md"
 curl -fsSLo "$skill/scripts/mailbox.py" "$src/scripts/mailbox.py"
 ```
 

@@ -2,13 +2,14 @@
 
 [English](../agent-integration.md) | 简体中文
 
-先用[现成镜像安装指南](../../deploy/README.zh-CN.md)确认能收发测试 Issue。在 Agent 工作项目里下载这两个文件，不用 clone：
+先用[现成镜像安装指南](../../deploy/README.zh-CN.md)确认能收发测试 Issue。在 Agent 工作项目里下载 Skill、参考说明和脚本，不用 clone：
 
 ```sh
 skill=.agents/skills/multica-bridge
 src=https://raw.githubusercontent.com/godlikejay/multica-agent-bridge/main/skills/multica-bridge
-mkdir -p "$skill/scripts"
+mkdir -p "$skill/scripts" "$skill/references"
 curl -fsSLo "$skill/SKILL.md" "$src/SKILL.md"
+curl -fsSLo "$skill/references/operations.md" "$src/references/operations.md"
 curl -fsSLo "$skill/scripts/mailbox.py" "$src/scripts/mailbox.py"
 ```
 

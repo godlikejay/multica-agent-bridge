@@ -111,6 +111,65 @@ class TakeCursor(legacy.MailboxCLI):
         (self.outbox / "input.json").unlink()
         self.assertEqual(self.invoke("take", "FIX-1")["status"], "input_unavailable")
 
+    def test_documented_commands_across_routes_and_acknowledgment_bounds(self):
+        _, a = self.scoped_fixture("cloud", legacy.LINE_A)
+        _, b = self.scoped_fixture("cloud", legacy.LINE_B)
+        body = "Mobile save\n" + "背景" * 6000
+        task = json.loads((a / "task-1.json").read_text())
+        task.update(issue_key="APP-42", body=body)
+        (a / "task-1.json").write_text(json.dumps(task))
+        other = json.loads((b / "task-1.json").read_text())
+        (b / "task-1.json").unlink()
+        (b / "other-task.json").write_text(json.dumps(dict(other, id="other-task", issue_key="APP-43")))
+
+        def event(event_id, kind, **fields):
+            (a / (event_id + ".json")).write_text(
+                json.dumps(dict(task, id=event_id, kind=kind, **fields)))
+
+        event("ready", "sync", status="healthy", revision="1", input_ids=["run-input"])
+        event("run-input", "comment", run_input="trigger", source_id="native-comment")
+        helper = self.project_tool("documented-commands")
+        helper("setup", self.root, "--route", f"cloud:{legacy.LINE_A}", "--route", f"cloud:{legacy.LINE_B}")
+
+        first = helper("take", "APP-42")
+        target, input_id = first["target"], first["inputs"][0]["target"]
+        self.assertEqual(first["status"], "ready")
+        self.assertTrue(first["truncated"])
+        self.assertEqual(first["read_target"], target)
+        self.assertEqual(first["ackable"], [input_id])
+        self.assertIn("fully delivered", helper("ack-take", target, target, input_id, success=False))
+        self.assertFalse((a / ".acks").exists())
+        verbose = helper("--verbose", "show", target)
+        flags = ("--connection", verbose["connection_id"], "--workspace", verbose["workspace_id"])
+        self.assertIn("multiple project routes", helper("read", target, success=False))
+        page = helper(*flags, "read", first["read_target"])
+        chunks = [page["body"]]
+        while "next_offset" in page:
+            page = helper(*flags, "read", target, "--offset", page["next_offset"])
+            chunks.append(page["body"])
+        self.assertEqual("".join(chunks), body)
+        follow = helper("take", target, "--cursor", first["cursor"])
+        self.assertEqual(follow["inputs"], first["inputs"])
+        self.assertNotIn("text", follow)
+        self.assertEqual(helper("take", target, "--full")["ackable"], [target, input_id])
+
+        sent = helper("reply", input_id, "--body-file", self.body, "--wait", 0)
+        self.assertEqual(sent["status"], "pending")
+        req = json.loads(next(self.inbox.rglob(sent["request"] + ".json")).read_text())
+        self.assertEqual((req["kind"], req["parent_id"], req["workspace_id"], req["run_id"]),
+                         ("reply", "native-comment", legacy.LINE_A, "run-1"))
+        event("reply-receipt", "receipt", request_id=sent["request"], status="reply_posted")
+        self.assertEqual(helper("result", sent["request"]), {"status": "reply_posted"})
+        self.assertEqual(helper("ack-take", target, input_id)["count"], 1)
+
+        finished = helper("complete", "--current", "--body-file", self.body, "--wait", 0)
+        finishing = json.loads(next(self.inbox.rglob(finished["request"] + ".json")).read_text())
+        self.assertEqual((finishing["kind"], finishing["run_id"]), ("complete", "run-1"))
+        self.assertNotIn("parent_id", finishing)
+        event("complete-receipt", "receipt", request_id=finished["request"], status="completion_requested")
+        self.assertEqual(helper("result", finished["request"]), {"status": "completion_requested"})
+        self.assertEqual(helper("current")["status"], "completion_requested")
+
     def test_attachment_url_byte_limit_and_unavailable_catalog(self):
         self.ready()
         self.invoke("take", "FIX-1")
