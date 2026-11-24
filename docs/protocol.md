@@ -19,7 +19,9 @@ uses the displayed Issue key or the project title for identity or routing.
 Events and requests are UTF-8 JSON objects in `<id>.json`. To publish an inbox
 file, write a temporary file in the same directory and then rename it into place.
 IDs use ASCII letters, digits, underscore, dot and hyphen, begin with an
-alphanumeric character and are at most 100 characters. IDs are unique within an Issue. Do not reuse an ID with
+alphanumeric character and are at most 100 characters. Event IDs must be
+unique across Issues in a connection/workspace Outbox; request IDs are
+scoped to an Issue within that connection/workspace. Do not reuse an ID with
 different bytes; do not overwrite or clear the state of a live mailbox. Files
 larger than 256 KiB, links, partial files and malformed input are ignored. Submit
 one request at a time **per Issue**, waiting for that action’s receipt.
@@ -124,7 +126,12 @@ belonging to that Run's Issue. The caller URL is a reference, not a
 network destination; arbitrary Markdown links, other Issues and stale
 Run bindings are rejected. A successful receipt has status
 `attachment_ready` and a mailbox-root-relative `attachment_path`.
-Files are temporary, scoped to the Run, and not a shared download cache.
+The worker fetches from the verified Multica API, not from the supplied URL.
+It accepts at most one HTTPS storage redirect, only to the inventory
+entry’s storage origin on a public address, without forwarding Multica
+credentials or task headers. Limits are 32 MiB per file, eight retained
+files per Run, and 64 MiB total per Run. Files are temporary, scoped to the Run, and
+not a shared download cache.
 The consumer can remove them or copy/move them out of Outbox before
 completion. Terminal Run cleanup only removes that Run's managed files
 in Outbox. A hard process kill can defer cleanup until the next verified
@@ -141,6 +148,10 @@ that exact Run, not the presence of a newer Run.
 
 Receipt statuses:
 
+- `attachment_ready`: file published at the returned `attachment_path`.
+- `attachment_unavailable`: retrieval or publication failed (for example,
+  the file no longer belongs to the Issue, its redirect was refused, or
+  a limit was reached).
 - `reply_posted`: the issue comment API returned a matching comment.
 - `completion_requested`: final comment accepted and local completion
   persisted. Confirm remote Run completion in Multica; this is not proof of it.

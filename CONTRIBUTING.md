@@ -1,48 +1,46 @@
 # Contributing
 
-Use a clean checkout. Run `make check` and `make build` before submitting a
-change. The first command uses fixtures only. It must not discover an installed
-coding agent, read real credentials, or connect to an outside workspace.
+Start with the [architecture map](docs/architecture.md) to trace a Run from
+Compose to the mailbox and find the relevant source and tests. For installed
+Bridge operation, use the [operator guide](deploy/README.md), not a Compose
+file at the repository root.
 
-| Change | Start here |
+## Choose the smallest verification that proves the change
+
+| Command | What it proves |
 | --- | --- |
-| ACP handshake and wait/cancel | `internal/acp` |
-| Task identity, comments, API transport | `internal/multica` |
-| JSON files, replay and run epochs | `internal/mailbox`, `internal/bridge` and [protocol](docs/protocol.md) |
-| Runtime image and day-to-day deployment | [Dockerfile](Dockerfile), [deploy/compose.yaml](deploy/compose.yaml), [local build](docs/deployment.md) and [operator install](deploy/README.md) |
-| Real Multica acceptance | [One Docker smoke test](e2e/README.md) |
-| Daemon supervision and connection settings | `internal/supervisor`, [connection configuration](deploy/README.md#connection-settings) |
-| Public mailbox tool and user Skill | [skills/multica-bridge](skills/multica-bridge/SKILL.md) |
+| `make check build` | Offline Go tests with race detection, vet, Python mailbox CLI tests, shell syntax checks and a Go build, all with synthetic fixtures. |
+| `make container-smoke` | Connection control through the installed Compose entry point with synthetic connections, without a live Multica service. |
+| `make e2e-auto` | The real pinned Multica server and daemon work with the Go worker. See the [disposable Docker smoke](e2e/README.md) for exactly what it checks. |
 
-Keep scheduling, delivery, and isolation regressions offline: the bridge tests
-cover independent Issues and endpoints, follow-up delivery and stale requests;
-the client and supervisor tests cover the API contract, routing and recovery.
-Regression CI runs on branch pushes and pull requests that change code,
-tests, or runtime/build inputs, including direct pushes to `main`. It skips
-standalone documentation edits outside the test paths. It does not publish
-images or block direct pushes; a failed check is reported on the commit.
+Run `make check build` before submitting code. Keep scheduling, delivery, and
+isolation regressions offline, including independent Issues and endpoints,
+stale requests, and recovery. For the Docker smoke, record the upstream
+version, command and result separately. That smoke uses the file protocol
+directly; it does not run the installed Python Skill, launch a coding agent,
+drive a browser, or test Multica Cloud. Python subprocess tests exercise the
+actual CLI against local fixtures, not a live Run. Avoid parallel instruction
+sets or changing security boundaries to make a test pass.
 
-- `make check build` runs offline Go tests (with race detection), vet,
-  Python test discovery, shell syntax checks, and the Go build.
-- `make container-smoke` checks connection control through the installed
-  Compose entry point with synthetic connections. It does not use a live
-  Multica service.
-- `make e2e-auto` starts a disposable Multica to verify claim, reply and
-  completion. Record upstream version, command and outcome. Fixture success
-  alone is not proof of a real Run.
+Examples and tests must use invented data. Do not discover installed coding
+agents, read real credentials, or connect to a team workspace. Keep test state,
+authentication and local path mappings out of Git.
 
-PRs and feature branch pushes validate only. On `main`, the same three
-checks must pass for the exact commit before CI calls the image publisher.
-Automatic publication is limited to image inputs; test-only changes run the
-checks without rebuilding. To request a rebuild, run the Regression workflow
-manually on `main`; it still requires all three checks. This is a release
-gate, not a change to branch protection.
+## CI and image publication
 
-When upgrading Multica, update the pinned upstream images in `Dockerfile` and
-`e2e/compose.yaml` together. Check the task API and ACP contract against the new
-source, adjust offline fixtures only for real contract changes, then run the
-same Docker smoke against the new pin before merging.
+[Regression](.github/workflows/regression.yml) runs the three checks above
+on feature branch pushes, pull requests and main pushes that match its paths.
+Markdown-only pushes do not trigger it. Feature pushes and PR runs never
+publish an image. On `main`, all three checks must pass for the exact commit
+before publication; only changes to [image inputs](.github/scripts/image-inputs.sh)
+automatically rebuild the image. Changes limited to `e2e/` or the Python
+Skill scripts run checks without publishing. Go tests under `cmd/` or
+`internal/` count as image inputs because those trees are included in the
+build context. For an intentional
+rebuild, run Regression manually on `main`; the same three checks still gate
+publication. This is an image release gate, not branch protection.
 
-Examples and fixtures must use invented data. Keep test state, authentication,
-and local path mappings out of Git. Avoid parallel instruction sets or changes
-to the security model to make an integration test pass.
+When upgrading Multica, update the pinned upstream images in [Dockerfile](Dockerfile)
+and [e2e/compose.yaml](e2e/compose.yaml) together. Check the task API and ACP
+contract against the new source, adjust offline fixtures only for real contract
+changes, then run the Docker smoke against the new pin before merging.

@@ -37,5 +37,7 @@ digest when the deployed image must be reproducible.
 
 The [Regression workflow](../.github/workflows/regression.yml) calls the
 publisher only on `main` after all three checks pass for the same commit.
-Docker build inputs and the publisher trigger automatic builds; test-only
-changes do not. To rebuild, run **Regression** manually on `main`.
+Only [image-input changes](../.github/scripts/image-inputs.sh) trigger
+automatic publication. Changes limited to the Docker E2E fixtures or Python
+Skill scripts run checks without publishing. For full path rules and manual
+rebuilds, see [contributor verification](../CONTRIBUTING.md#ci-and-image-publication).
