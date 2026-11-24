@@ -2,6 +2,7 @@
 
 [English](../README.md) | 简体中文
 
+- [MAB 解决什么问题：一轮任务怎么交接](workflow.md)
 - [用现成镜像安装，不用 clone](../../deploy/README.zh-CN.md)
 - [开发时在本地构建镜像](deployment.md)
 - [Codex、agy、OMP 怎么收任务和交结果](agent-integration.md)

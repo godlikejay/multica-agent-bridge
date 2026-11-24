@@ -2,10 +2,12 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A file mailbox between a [Multica](https://github.com/multica-ai/multica) issue run
-and a local operator. The bridge uses Multica's Hermes ACP interface without
-running a model. It does not launch or control an agent, open a checkout, or
-execute instructions from issue text.
+Assign work in [Multica](https://github.com/multica-ai/multica) and pick it up
+in the coding agent you already use. The Bridge carries tasks and authorized
+replies between them without letting a remote assignment start your local
+coding tools. You choose when and where the work runs.
+
+[Why use a bridge? See how it works with a private screenshot and a follow-up.](docs/workflow.md)
 
 This repository is an early prototype with one writer per Issue. Do not connect it to a
 team or production workspace until the disposable integration suite passes and

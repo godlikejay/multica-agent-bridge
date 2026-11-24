@@ -2,7 +2,9 @@
 
 [English](README.md) | 简体中文
 
-Multica 把已启动的任务交给 Bridge（MAB），Bridge 写进本地邮箱。你自己的 Codex、agy 或 OMP 可以读任务、发回复或结束一轮执行。Bridge 不会自行启动这些 Agent，也不会执行 Issue 里的指令。
+团队在 Multica 派任务、看结果，你在自己的 Codex、agy 或 OMP 里做事。Bridge（MAB）负责交接任务和你授权的回复，不让远程派单直接启动你的本地编码工具。什么时候做、在哪里做，由你决定。
+
+[MAB 解决什么问题：从私有截图到 Safari 跟进的完整例子](docs/zh-CN/workflow.md)。
 
 ## 安装
 
