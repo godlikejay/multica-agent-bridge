@@ -374,8 +374,7 @@ def invocation_protocol(owner_token, with_attachments=False):
         other_id = uuid_field(other, 'id')
         require(other.get('workspace_id') == workspace and not other.get('assignee_id'),
                 'foreign attachment fixture must be an unassigned local Issue')
-        _, other_attachment_url = upload_attachment(FOREIGN_ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES,
-                     COMMENT_ATTACHMENT_NAME, FOREIGN_ATTACHMENT_BYTES,
+        _, other_attachment_url = upload_attachment(FOREIGN_ATTACHMENT_NAME, FOREIGN_ATTACHMENT_BYTES,
                                                     issue_id=other_id, **owner)
         comment_attachment = upload_attachment(COMMENT_ATTACHMENT_NAME, COMMENT_ATTACHMENT_BYTES, **owner)
     smoke(owner_token, follow_up=lambda task, parent: implicit_follow_up(

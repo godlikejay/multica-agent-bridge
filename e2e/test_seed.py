@@ -226,6 +226,38 @@ class SeedFixture(unittest.TestCase):
                             for h in seed.OPENER.handlers))
 
 
+    def test_invocation_seeds_current_comment_and_distinct_foreign_attachment(self):
+        owner_id, member_id, invite_id, foreign, comment = (
+            f'00000000-0000-0000-0000-{i:012d}' for i in range(71, 76))
+        foreign_url = '/api/attachments/' + foreign + '/download'
+        comment_url = '/api/attachments/' + comment + '/download'
+        responses = [
+            dict(id=owner_id), dict(id=member_id), dict(id=invite_id),
+            dict(role='member', user_id=member_id, workspace_id=WS),
+            [dict(name=seed.AGENT, id=AGENT, owner_id=owner_id,
+                  workspace_id=WS, permission_mode='private')],
+            dict(id=ISSUE, workspace_id=WS),
+        ]
+        # A sentinel stops after exercising attachment setup and smoke dispatch.
+        with (patch.object(seed, 'synthetic_workspace', return_value=WS),
+              patch.object(seed, 'login', return_value='member-jwt'),
+              patch.object(seed, 'request', side_effect=responses),
+              patch.object(seed, 'upload_attachment', autospec=True,
+                           side_effect=[(foreign, foreign_url), (comment, comment_url)]) as upload,
+              patch.object(seed, 'smoke', side_effect=RuntimeError('smoke dispatched')) as smoke,
+              self.assertRaisesRegex(RuntimeError, 'smoke dispatched')):
+            seed.invocation_protocol(SYNTHETIC_PAT, with_attachments=True)
+        self.assertEqual(upload.call_args_list[0].args,
+                         (seed.FOREIGN_ATTACHMENT_NAME, seed.FOREIGN_ATTACHMENT_BYTES))
+        self.assertEqual(upload.call_args_list[0].kwargs,
+                         {'issue_id': ISSUE, 'token': SYNTHETIC_PAT, 'workspace': WS})
+        self.assertEqual(upload.call_args_list[1].args,
+                         (seed.COMMENT_ATTACHMENT_NAME, seed.COMMENT_ATTACHMENT_BYTES))
+        self.assertEqual(upload.call_args_list[1].kwargs,
+                         {'token': SYNTHETIC_PAT, 'workspace': WS})
+        self.assertEqual(smoke.call_args.kwargs['foreign_attachment_url'], foreign_url)
+        self.assertEqual(smoke.call_args.kwargs['comment_attachment'], (comment, comment_url))
+
     def test_attachment_upload_is_multipart_and_returns_stable_path(self):
         attachment_id = '00000000-0000-0000-0000-000000000092'
         raw = json.dumps({'id': attachment_id, 'workspace_id': WS,
